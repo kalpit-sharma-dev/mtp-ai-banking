@@ -11,18 +11,29 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// IntentPattern represents a pattern for intent recognition
+type IntentPattern struct {
+	Name       string
+	Patterns   []*regexp.Regexp
+	Keywords   map[string]float64
+	IntentType model.IntentType
+}
+
 // IntentParser parses user input to extract intent and entities
 type IntentParser struct {
 	llmService *LLMService
-	useLLM    bool
+	useLLM     bool
+	patterns   []IntentPattern
 }
 
 // NewIntentParser creates a new intent parser
 func NewIntentParser(llmService *LLMService, useLLM bool) *IntentParser {
-	return &IntentParser{
+	parser := &IntentParser{
 		llmService: llmService,
-		useLLM:    useLLM,
+		useLLM:     useLLM,
 	}
+	parser.initializeIntentPatterns()
+	return parser
 }
 
 // ParseIntent parses user input to extract intent and entities
@@ -108,81 +119,320 @@ Respond in JSON format:
 	}, nil
 }
 
-// parseWithRules uses rule-based parsing for natural language
+// initializeIntentPatterns initializes intent patterns with regex and weighted keywords
+func (ip *IntentParser) initializeIntentPatterns() {
+	ip.patterns = []IntentPattern{
+		{
+			Name: "fund_transfer_neft",
+			Patterns: []*regexp.Regexp{
+				regexp.MustCompile(`(?i)transfer\s+(\d+(?:,\d{3})*(?:\.\d{2})?)\s+(?:rs\.?|₹|rupees?)?\s*(?:via\s+)?neft`),
+				regexp.MustCompile(`(?i)send\s+(\d+(?:,\d{3})*(?:\.\d{2})?)\s+(?:rs\.?|₹|rupees?)?\s*(?:via\s+)?neft`),
+				regexp.MustCompile(`(?i)neft\s+transfer\s+of\s+(\d+(?:,\d{3})*(?:\.\d{2})?)`),
+			},
+			Keywords: map[string]float64{
+				"neft":    1.0,
+				"transfer": 0.9,
+				"send":    0.8,
+				"money":   0.7,
+				"amount":  0.6,
+			},
+			IntentType: model.IntentTransferNEFT,
+		},
+		{
+			Name: "fund_transfer_rtgs",
+			Patterns: []*regexp.Regexp{
+				regexp.MustCompile(`(?i)transfer\s+(\d+(?:,\d{3})*(?:\.\d{2})?)\s+(?:rs\.?|₹|rupees?)?\s*(?:via\s+)?rtgs`),
+				regexp.MustCompile(`(?i)send\s+(\d+(?:,\d{3})*(?:\.\d{2})?)\s+(?:rs\.?|₹|rupees?)?\s*(?:via\s+)?rtgs`),
+				regexp.MustCompile(`(?i)rtgs\s+transfer\s+of\s+(\d+(?:,\d{3})*(?:\.\d{2})?)`),
+			},
+			Keywords: map[string]float64{
+				"rtgs":    1.0,
+				"transfer": 0.9,
+				"send":    0.8,
+				"money":   0.7,
+			},
+			IntentType: model.IntentTransferRTGS,
+		},
+		{
+			Name: "fund_transfer_imps",
+			Patterns: []*regexp.Regexp{
+				regexp.MustCompile(`(?i)transfer\s+(\d+(?:,\d{3})*(?:\.\d{2})?)\s+(?:rs\.?|₹|rupees?)?\s*(?:via\s+)?imps`),
+				regexp.MustCompile(`(?i)send\s+(\d+(?:,\d{3})*(?:\.\d{2})?)\s+(?:rs\.?|₹|rupees?)?\s*(?:via\s+)?imps`),
+				regexp.MustCompile(`(?i)imps\s+transfer\s+of\s+(\d+(?:,\d{3})*(?:\.\d{2})?)`),
+			},
+			Keywords: map[string]float64{
+				"imps":    1.0,
+				"transfer": 0.9,
+				"send":    0.8,
+				"money":   0.7,
+			},
+			IntentType: model.IntentTransferIMPS,
+		},
+		{
+			Name: "fund_transfer_upi",
+			Patterns: []*regexp.Regexp{
+				regexp.MustCompile(`(?i)transfer\s+(\d+(?:,\d{3})*(?:\.\d{2})?)\s+(?:rs\.?|₹|rupees?)?\s*(?:via\s+)?upi`),
+				regexp.MustCompile(`(?i)send\s+(\d+(?:,\d{3})*(?:\.\d{2})?)\s+(?:rs\.?|₹|rupees?)?\s*(?:via\s+)?upi`),
+				regexp.MustCompile(`(?i)pay\s+(\d+(?:,\d{3})*(?:\.\d{2})?)\s+(?:rs\.?|₹|rupees?)?\s*(?:via\s+)?upi`),
+				regexp.MustCompile(`(?i)upi\s+(?:to|for)\s+([a-zA-Z0-9@._-]+)`),
+			},
+			Keywords: map[string]float64{
+				"upi":     1.0,
+				"transfer": 0.9,
+				"send":    0.8,
+				"pay":     0.8,
+				"money":   0.7,
+			},
+			IntentType: model.IntentTransferUPI,
+		},
+		{
+			Name: "check_balance",
+			Patterns: []*regexp.Regexp{
+				regexp.MustCompile(`(?i)balance\s+(?:of|for|in)\s+(?:my\s+)?account\s*(\d*)`),
+				regexp.MustCompile(`(?i)how\s+much\s+(?:do\s+I\s+have|is\s+in\s+my\s+account|money\s+do\s+I\s+have)`),
+				regexp.MustCompile(`(?i)what\s+is\s+my\s+(?:account\s+)?balance`),
+				regexp.MustCompile(`(?i)show\s+my\s+balance`),
+				regexp.MustCompile(`(?i)check\s+(?:my\s+)?(?:account\s+)?balance`),
+			},
+			Keywords: map[string]float64{
+				"balance":   1.0,
+				"amount":    0.8,
+				"available": 0.7,
+				"check":     0.6,
+				"show":      0.6,
+				"how much":  0.7,
+			},
+			IntentType: model.IntentCheckBalance,
+		},
+		{
+			Name: "get_statement",
+			Patterns: []*regexp.Regexp{
+				regexp.MustCompile(`(?i)statement\s+(?:of|for)\s+(?:my\s+)?account`),
+				regexp.MustCompile(`(?i)mini\s+statement`),
+				regexp.MustCompile(`(?i)transaction\s+history`),
+				regexp.MustCompile(`(?i)show\s+my\s+transactions`),
+				regexp.MustCompile(`(?i)recent\s+transactions`),
+			},
+			Keywords: map[string]float64{
+				"statement":  1.0,
+				"transactions": 0.9,
+				"history":   0.8,
+				"mini":      0.7,
+				"recent":    0.6,
+			},
+			IntentType: model.IntentGetStatement,
+		},
+		{
+			Name: "add_beneficiary",
+			Patterns: []*regexp.Regexp{
+				regexp.MustCompile(`(?i)add\s+(?:new\s+)?(?:payee|beneficiary)\s+(?:named\s+)?([a-zA-Z\s]+)`),
+				regexp.MustCompile(`(?i)save\s+(?:new\s+)?(?:payee|beneficiary)\s+(?:named\s+)?([a-zA-Z\s]+)`),
+				regexp.MustCompile(`(?i)register\s+(?:new\s+)?(?:payee|beneficiary)`),
+			},
+			Keywords: map[string]float64{
+				"payee":       1.0,
+				"beneficiary": 0.9,
+				"add":         0.8,
+				"save":        0.7,
+				"new":         0.6,
+				"register":    0.6,
+			},
+			IntentType: model.IntentAddBeneficiary,
+		},
+		{
+			Name: "apply_loan",
+			Patterns: []*regexp.Regexp{
+				regexp.MustCompile(`(?i)apply\s+(?:for\s+)?(?:a\s+)?(personal|home|car|business)\s+loan`),
+				regexp.MustCompile(`(?i)need\s+(?:a\s+)?loan`),
+				regexp.MustCompile(`(?i)loan\s+application`),
+			},
+			Keywords: map[string]float64{
+				"loan":       1.0,
+				"apply":      0.9,
+				"borrow":     0.8,
+				"credit":     0.7,
+				"emi":        0.6,
+				"personal":   0.5,
+				"home":       0.5,
+			},
+			IntentType: model.IntentApplyLoan,
+		},
+		{
+			Name: "credit_score",
+			Patterns: []*regexp.Regexp{
+				regexp.MustCompile(`(?i)credit\s+score`),
+				regexp.MustCompile(`(?i)cibil\s+score`),
+				regexp.MustCompile(`(?i)credit\s+rating`),
+				regexp.MustCompile(`(?i)what\s+is\s+my\s+credit\s+score`),
+			},
+			Keywords: map[string]float64{
+				"credit":  1.0,
+				"score":  0.9,
+				"cibil":  0.8,
+				"rating": 0.7,
+			},
+			IntentType: model.IntentCreditScore,
+		},
+	}
+}
+
+// parseWithRules uses rule-based parsing with pattern matching and weighted keywords
 func (ip *IntentParser) parseWithRules(userInput string) (*model.Intent, error) {
 	input := strings.ToLower(userInput)
-	entities := make(map[string]interface{})
-
-	// Extract amount
-	amountRegex := regexp.MustCompile(`(?i)(?:rs\.?|₹|rupees?)?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)`)
-	if matches := amountRegex.FindStringSubmatch(input); len(matches) > 1 {
-		amountStr := strings.ReplaceAll(matches[1], ",", "")
-		entities["amount"] = amountStr
+	
+	// Find best matching intent
+	var bestIntent *IntentPattern
+	highestConfidence := 0.0
+	
+	for i := range ip.patterns {
+		pattern := &ip.patterns[i]
+		confidence := ip.calculateConfidence(input, pattern)
+		
+		if confidence > highestConfidence {
+			highestConfidence = confidence
+			bestIntent = pattern
+		}
 	}
-
-	// Extract account number
-	accountRegex := regexp.MustCompile(`(?i)(?:account|acc|ac)\s*(?:no|number|#)?\s*:?\s*([\dX]{4,})`)
-	if matches := accountRegex.FindStringSubmatch(input); len(matches) > 1 {
-		entities["to_account"] = matches[1]
+	
+	// Extract entities based on best intent
+	entities := ip.extractEntities(userInput, bestIntent)
+	
+	// If no good match, default to unknown
+	if bestIntent == nil || highestConfidence < 0.3 {
+		return &model.Intent{
+			Type:        model.IntentUnknown,
+			Confidence:  highestConfidence,
+			Entities:    entities,
+			OriginalText: userInput,
+		}, nil
 	}
-
-	// Extract IFSC
-	ifscRegex := regexp.MustCompile(`(?i)ifsc\s*:?\s*([A-Z]{4}0[A-Z0-9]{6})`)
-	if matches := ifscRegex.FindStringSubmatch(input); len(matches) > 1 {
-		entities["ifsc"] = matches[1]
-	}
-
-	// Determine intent based on keywords
-	var intentType model.IntentType
-	var confidence float64 = 0.7
-
-	switch {
-	case containsAny(input, []string{"neft", "transfer neft", "send via neft", "transfer", "send money", "pay"}):
-		intentType = model.IntentTransferNEFT
-		confidence = 0.9
-	case containsAny(input, []string{"rtgs", "transfer rtgs"}):
-		intentType = model.IntentTransferRTGS
-		confidence = 0.9
-	case containsAny(input, []string{"imps", "transfer imps"}):
-		intentType = model.IntentTransferIMPS
-		confidence = 0.9
-	case containsAny(input, []string{"upi", "pay via upi", "scan qr"}):
-		intentType = model.IntentTransferUPI
-		confidence = 0.9
-	case containsAny(input, []string{"balance", "check balance", "account balance", "how much", "what is my balance"}):
-		intentType = model.IntentCheckBalance
-		confidence = 0.95
-	case containsAny(input, []string{"statement", "mini statement", "transaction history", "transactions", "history"}):
-		intentType = model.IntentGetStatement
-		confidence = 0.9
-	case containsAny(input, []string{"add beneficiary", "add payee", "save beneficiary", "beneficiary"}):
-		intentType = model.IntentAddBeneficiary
-		confidence = 0.9
-	case containsAny(input, []string{"loan", "apply loan", "personal loan"}):
-		intentType = model.IntentApplyLoan
-		confidence = 0.85
-	case containsAny(input, []string{"credit score", "cibil score", "credit rating"}):
-		intentType = model.IntentCreditScore
-		confidence = 0.85
-	default:
-		intentType = model.IntentUnknown
-		confidence = 0.3
-	}
-
+	
 	return &model.Intent{
-		Type:        intentType,
-		Confidence:  confidence,
+		Type:        bestIntent.IntentType,
+		Confidence:  highestConfidence,
 		Entities:    entities,
 		OriginalText: userInput,
 	}, nil
 }
 
-func containsAny(s string, keywords []string) bool {
-	for _, keyword := range keywords {
-		if strings.Contains(s, keyword) {
-			return true
+// calculateConfidence calculates confidence score for an intent pattern
+func (ip *IntentParser) calculateConfidence(message string, pattern *IntentPattern) float64 {
+	confidence := 0.0
+	words := strings.Fields(message)
+	
+	// Check regex patterns (higher weight for exact matches)
+	for _, regexPattern := range pattern.Patterns {
+		if regexPattern.MatchString(message) {
+			confidence += 0.5
 		}
 	}
-	return false
+	
+	// Check weighted keywords (both single words and multi-word phrases)
+	keywordMatches := 0
+	for keyword, weight := range pattern.Keywords {
+		// Check if keyword is a multi-word phrase
+		if strings.Contains(keyword, " ") {
+			if strings.Contains(message, keyword) {
+				confidence += weight
+				keywordMatches++
+			}
+		} else {
+			// Single word keyword
+			for _, word := range words {
+				if word == keyword {
+					confidence += weight
+					keywordMatches++
+					break // Only count once per keyword
+				}
+			}
+		}
+	}
+	
+	// Normalize confidence (cap at 1.0)
+	if confidence > 1.0 {
+		confidence = 1.0
+	}
+	
+	// Boost confidence if multiple keywords match
+	if keywordMatches > 1 {
+		confidence = confidence * 1.1
+		if confidence > 1.0 {
+			confidence = 1.0
+		}
+	}
+	
+	return confidence
+}
+
+// extractEntities extracts entities from user input based on intent
+func (ip *IntentParser) extractEntities(message string, pattern *IntentPattern) map[string]interface{} {
+	entities := make(map[string]interface{})
+	input := strings.ToLower(message)
+	
+	// Extract amount (common for transfers)
+	amountRegex := regexp.MustCompile(`(?i)(?:rs\.?|₹|rupees?)?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:rs|rupees|inr)?`)
+	if matches := amountRegex.FindStringSubmatch(message); len(matches) > 1 {
+		amountStr := strings.ReplaceAll(matches[1], ",", "")
+		entities["amount"] = amountStr
+	}
+	
+	// Extract account number
+	accountRegex := regexp.MustCompile(`(?i)(?:account|acc|ac)\s*(?:no|number|#)?\s*:?\s*([\dX]{4,})`)
+	if matches := accountRegex.FindStringSubmatch(message); len(matches) > 1 {
+		entities["to_account"] = matches[1]
+	}
+	
+	// Extract IFSC code
+	ifscRegex := regexp.MustCompile(`(?i)ifsc\s*:?\s*([A-Z]{4}0[A-Z0-9]{6})`)
+	if matches := ifscRegex.FindStringSubmatch(message); len(matches) > 1 {
+		entities["ifsc"] = matches[1]
+	}
+	
+	// Extract UPI ID
+	upiRegex := regexp.MustCompile(`(?i)([a-zA-Z0-9._-]+@[a-zA-Z0-9]+)`)
+	if matches := upiRegex.FindStringSubmatch(message); len(matches) > 1 {
+		entities["upi_id"] = matches[1]
+	}
+	
+	// Extract payee/beneficiary name
+	if pattern != nil && (pattern.IntentType == model.IntentAddBeneficiary || pattern.IntentType == model.IntentTransferNEFT || pattern.IntentType == model.IntentTransferRTGS || pattern.IntentType == model.IntentTransferIMPS) {
+		nameRegex := regexp.MustCompile(`(?i)(?:to|for|payee|beneficiary|named)\s+([a-zA-Z\s]{2,})`)
+		if matches := nameRegex.FindStringSubmatch(message); len(matches) > 1 {
+			entities["payee_name"] = strings.TrimSpace(matches[1])
+		}
+	}
+	
+	// Extract loan type
+	if pattern != nil && pattern.IntentType == model.IntentApplyLoan {
+		loanTypes := []string{"personal", "home", "car", "business"}
+		for _, loanType := range loanTypes {
+			if strings.Contains(input, loanType) {
+				entities["loan_type"] = loanType
+				break
+			}
+		}
+	}
+	
+	// Extract transfer method if not already specified
+	if pattern != nil && (pattern.IntentType == model.IntentTransferNEFT || pattern.IntentType == model.IntentTransferRTGS || pattern.IntentType == model.IntentTransferIMPS || pattern.IntentType == model.IntentTransferUPI) {
+		methods := map[string]string{
+			"upi":  "UPI",
+			"imps": "IMPS",
+			"neft": "NEFT",
+			"rtgs": "RTGS",
+		}
+		for method, value := range methods {
+			if strings.Contains(input, method) {
+				entities["method"] = value
+				break
+			}
+		}
+		// Default to UPI if no method specified but it's a transfer
+		if _, exists := entities["method"]; !exists {
+			entities["method"] = "UPI"
+		}
+	}
+	
+	return entities
 }
 

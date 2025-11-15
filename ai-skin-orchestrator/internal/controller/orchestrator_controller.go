@@ -11,13 +11,15 @@ import (
 
 // OrchestratorController handles orchestration requests
 type OrchestratorController struct {
-	orchestrator *service.Orchestrator
+	orchestrator  *service.Orchestrator
+	sessionService *service.SessionService
 }
 
 // NewOrchestratorController creates a new orchestrator controller
-func NewOrchestratorController(orchestrator *service.Orchestrator) *OrchestratorController {
+func NewOrchestratorController(orchestrator *service.Orchestrator, sessionService *service.SessionService) *OrchestratorController {
 	return &OrchestratorController{
-		orchestrator: orchestrator,
+		orchestrator:   orchestrator,
+		sessionService: sessionService,
 	}
 }
 
@@ -40,12 +42,30 @@ func (oc *OrchestratorController) ProcessRequest(w http.ResponseWriter, r *http.
 		req.InputType = "natural_language"
 	}
 
+	// Get or create session
+	session := oc.sessionService.GetOrCreateSession(r.Context(), req.SessionID, req.UserID, req.Channel)
+	req.SessionID = session.SessionID
+
+	// Add user message to session
+	oc.sessionService.AddMessage(session.SessionID, "user", req.Input)
+
 	// Process request
 	response, err := oc.orchestrator.ProcessRequest(r.Context(), &req)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Failed to process request", err)
 		return
 	}
+
+	// Add bot response to session
+	if response.Explanation != "" {
+		oc.sessionService.AddMessage(session.SessionID, "bot", response.Explanation)
+	}
+
+	// Add session ID to response
+	if response.FinalResult == nil {
+		response.FinalResult = make(map[string]interface{})
+	}
+	response.FinalResult["session_id"] = session.SessionID
 
 	respondWithJSON(w, http.StatusOK, response)
 }

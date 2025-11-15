@@ -10,11 +10,14 @@ export default function AIAssistant() {
       role: 'bot',
       content: 'Hello! I\'m your AI banking assistant. How can I help you today?',
       timestamp: new Date(),
+      isTyping: false,
     },
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [sessionId, setSessionId] = useState('')
   const messagesEndRef = useRef(null)
+  const typingTimeoutRef = useRef(null)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -23,6 +26,51 @@ export default function AIAssistant() {
   useEffect(() => {
     scrollToBottom()
   }, [messages])
+
+  // Typing effect function
+  const typeMessage = (messageObj, fullText, messageIndex) => {
+    let currentIndex = 0
+    const typingSpeed = 20 // milliseconds per character
+
+    const typeChar = () => {
+      if (currentIndex < fullText.length) {
+        const newContent = fullText.substring(0, currentIndex + 1)
+        setMessages((prev) => {
+          const updated = [...prev]
+          updated[messageIndex] = {
+            ...messageObj,
+            content: newContent,
+            isTyping: currentIndex < fullText.length - 1,
+          }
+          return updated
+        })
+        currentIndex++
+        typingTimeoutRef.current = setTimeout(typeChar, typingSpeed)
+      } else {
+        // Typing complete
+        setMessages((prev) => {
+          const updated = [...prev]
+          updated[messageIndex] = {
+            ...messageObj,
+            content: fullText,
+            isTyping: false,
+          }
+          return updated
+        })
+      }
+    }
+
+    typeChar()
+  }
+
+  // Cleanup typing timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current)
+      }
+    }
+  }, [])
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -46,8 +94,8 @@ export default function AIAssistant() {
 
       console.log('Sending request to orchestrator:', { input, userId: user.id, channel: user.channel })
       
-      // Process request through AI Skin Orchestrator
-      const response = await orchestratorAPI.processRequest(input, user.id, user.channel)
+      // Process request through AI Skin Orchestrator (with session ID)
+      const response = await orchestratorAPI.processRequest(input, user.id, user.channel, sessionId)
       
       console.log('Received response from orchestrator:', response)
 
@@ -151,14 +199,29 @@ export default function AIAssistant() {
         }
       }
 
-      const botMessage = {
-        role: 'bot',
-        content: message,
-        timestamp: new Date(),
-        data: response,
+      // Store session ID for future requests
+      if (response.final_result?.session_id) {
+        setSessionId(response.final_result.session_id)
       }
 
-      setMessages((prev) => [...prev, botMessage])
+      // Add bot message with typing effect
+      const botMessage = {
+        role: 'bot',
+        content: '',
+        fullContent: message,
+        timestamp: new Date(),
+        data: response,
+        isTyping: true,
+      }
+
+      setMessages((prev) => {
+        const newMessages = [...prev, botMessage]
+        // Start typing effect after state update
+        setTimeout(() => {
+          typeMessage(botMessage, message, newMessages.length - 1)
+        }, 0)
+        return newMessages
+      })
     } catch (error) {
       // Extract error message from axios interceptor format
       let errorMsg = 'Sorry, I encountered an error processing your request. Please try again.'
@@ -240,6 +303,9 @@ export default function AIAssistant() {
                       <span key={idx}>{part}</span>
                     )
                   )}
+                  {message.isTyping && (
+                    <span className="inline-block w-2 h-4 bg-gray-600 ml-1 animate-pulse">|</span>
+                  )}
                 </div>
                 {message.data && message.data.risk_score !== undefined && (
                   <p className="text-xs mt-2 opacity-75">
@@ -273,7 +339,7 @@ export default function AIAssistant() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Type your message... (e.g., 'Transfer 50000 rupees to account XXXX4321 via NEFT')"
-              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent text-gray-900 bg-white"
               disabled={loading}
             />
             <button

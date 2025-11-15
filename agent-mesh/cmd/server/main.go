@@ -40,7 +40,7 @@ func main() {
 		Msg("Starting Agent")
 
 	// Create agent base
-	agentBase := service.NewAgentBase(agentType, agentName, endpoint, &cfg.MCPServer)
+	agentBase := service.NewAgentBase(agentType, agentName, endpoint, &cfg.MCPServer, &cfg.MLModels, &cfg.BankingIntegrations)
 
 	// Create specific agent based on type
 	var agentProcessor service.ProcessRequest

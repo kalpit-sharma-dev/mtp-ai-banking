@@ -1,8 +1,11 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -149,10 +152,106 @@ func (o *Orchestrator) executeTask(ctx context.Context, task *model.Task, decisi
 
 // callAgent calls the agent's REST endpoint
 func (o *Orchestrator) callAgent(ctx context.Context, agent *model.Agent, request map[string]interface{}) (map[string]interface{}, float64, string, error) {
-	// For now, use mock responses based on agent type
-	// In production, this would make actual HTTP/gRPC calls
+	// Make actual HTTP call to agent endpoint
+	if agent.Endpoint == "" {
+		log.Warn().Str("agent_id", agent.AgentID).Msg("Agent endpoint is empty, using mock")
+		return o.mockAgentByType(agent.Type, request)
+	}
 
-	switch agent.Type {
+	// Prepare request payload for agent
+	agentRequest := map[string]interface{}{
+		"agent_id":      agent.AgentID,
+		"request_id":    fmt.Sprintf("req_%d", time.Now().UnixNano()),
+		"task":          request["task"],
+		"input_context": request["input_context"],
+		"session_id":    request["session_id"],
+	}
+
+	// Marshal request body
+	body, err := json.Marshal(agentRequest)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to marshal agent request")
+		return o.mockAgentByType(agent.Type, request)
+	}
+
+	// Build agent URL
+	agentURL := fmt.Sprintf("%s/api/v1/process", agent.Endpoint)
+
+	log.Info().
+		Str("agent_id", agent.AgentID).
+		Str("agent_type", string(agent.Type)).
+		Str("endpoint", agentURL).
+		Msg("Calling agent endpoint")
+
+	// Create HTTP request
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", agentURL, bytes.NewBuffer(body))
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agent.AgentID).Msg("Failed to create HTTP request")
+		return o.mockAgentByType(agent.Type, request)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-API-Key", "test-api-key") // Use same API key as agents expect
+
+	// Make HTTP call
+	resp, err := o.httpClient.Do(httpReq)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("agent_id", agent.AgentID).
+			Str("endpoint", agentURL).
+			Msg("Failed to call agent, falling back to mock")
+		return o.mockAgentByType(agent.Type, request)
+	}
+	defer resp.Body.Close()
+
+	// Read response body
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Error().Err(err).Str("agent_id", agent.AgentID).Msg("Failed to read agent response")
+		return o.mockAgentByType(agent.Type, request)
+	}
+
+	// Check status code
+	if resp.StatusCode != http.StatusOK {
+		log.Error().
+			Int("status_code", resp.StatusCode).
+			Str("agent_id", agent.AgentID).
+			Str("response", string(respBody)).
+			Msg("Agent returned error status, falling back to mock")
+		return o.mockAgentByType(agent.Type, request)
+	}
+
+	// Parse agent response
+	var agentResponse struct {
+		AgentID     string                 `json:"agent_id"`
+		AgentType   string                 `json:"agent_type"`
+		Status      string                 `json:"status"`
+		Result      map[string]interface{} `json:"result"`
+		RiskScore   float64                `json:"risk_score"`
+		Explanation string                 `json:"explanation"`
+		Confidence  float64                `json:"confidence"`
+		RequestID   string                 `json:"request_id"`
+	}
+
+	if err := json.Unmarshal(respBody, &agentResponse); err != nil {
+		log.Error().Err(err).Str("agent_id", agent.AgentID).Str("response", string(respBody)).Msg("Failed to parse agent response")
+		return o.mockAgentByType(agent.Type, request)
+	}
+
+	log.Info().
+		Str("agent_id", agent.AgentID).
+		Str("status", agentResponse.Status).
+		Float64("risk_score", agentResponse.RiskScore).
+		Msg("Successfully called agent")
+
+	// Return agent response
+	return agentResponse.Result, agentResponse.RiskScore, agentResponse.Explanation, nil
+}
+
+// mockAgentByType returns mock response based on agent type (fallback)
+func (o *Orchestrator) mockAgentByType(agentType model.AgentType, request map[string]interface{}) (map[string]interface{}, float64, string, error) {
+	switch agentType {
 	case model.AgentTypeBanking:
 		return o.mockBankingAgent(request)
 	case model.AgentTypeFraud:

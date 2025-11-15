@@ -80,8 +80,9 @@ func LoadConfig() (*Config, error) {
 	viper.SetDefault("MCP_SERVER_URL", "http://localhost:8080")
 	viper.SetDefault("MCP_SERVER_API_KEY", "test-api-key")
 	viper.SetDefault("MCP_SERVER_TIMEOUT", "30")
-	viper.SetDefault("LLM_PROVIDER", "openai")
-	viper.SetDefault("LLM_MODEL", "gpt-3.5-turbo")
+	viper.SetDefault("LLM_PROVIDER", "ollama") // Default to Ollama
+	viper.SetDefault("LLM_MODEL", "llama3")
+	viper.SetDefault("LLM_BASE_URL", "http://localhost:11434") // Ollama default port
 	viper.SetDefault("LLM_TEMPERATURE", "0.7")
 	viper.SetDefault("LLM_MAX_TOKENS", "1000")
 	viper.SetDefault("LLM_ENABLED", "true")
@@ -111,10 +112,10 @@ func LoadConfig() (*Config, error) {
 			Timeout: 30,
 		},
 		LLM: LLMConfig{
-			Provider:    getEnv("LLM_PROVIDER", "openai"),
+			Provider:    getEnv("LLM_PROVIDER", "ollama"),
 			APIKey:      getEnv("LLM_API_KEY", ""),
-			Model:       getEnv("LLM_MODEL", "gpt-3.5-turbo"),
-			BaseURL:     getEnv("LLM_BASE_URL", ""),
+			Model:       getEnv("LLM_MODEL", "llama3"),
+			BaseURL:     getEnv("LLM_BASE_URL", "http://localhost:11434"),
 			Temperature: 0.7,
 			MaxTokens:   1000,
 			Enabled:     getEnv("LLM_ENABLED", "true") == "true",

@@ -47,8 +47,11 @@ func main() {
 		responseMerger,
 	)
 
+	// Initialize session service
+	sessionService := service.NewSessionService()
+
 	// Initialize controllers
-	orchestratorController := controller.NewOrchestratorController(orchestrator)
+	orchestratorController := controller.NewOrchestratorController(orchestrator, sessionService)
 
 	// Initialize rate limiter
 	rateLimiter := middleware.NewRateLimiter()

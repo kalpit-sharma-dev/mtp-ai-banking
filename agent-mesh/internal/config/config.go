@@ -11,11 +11,13 @@ import (
 
 // Config holds all configuration for agents
 type Config struct {
-	Server    ServerConfig
-	MCPServer MCPServerConfig
-	Agent     AgentConfig
-	Logging   LoggingConfig
-	Security  SecurityConfig
+	Server              ServerConfig
+	MCPServer           MCPServerConfig
+	Agent               AgentConfig
+	Logging             LoggingConfig
+	Security            SecurityConfig
+	MLModels            MLModelsConfig
+	BankingIntegrations BankingIntegrationsConfig
 }
 
 // ServerConfig holds server-related configuration
@@ -56,6 +58,22 @@ type SecurityConfig struct {
 	RateLimitRPS int
 }
 
+// MLModelsConfig holds ML Models service configuration
+type MLModelsConfig struct {
+	BaseURL string
+	APIKey  string
+	Timeout int
+	Enabled bool
+}
+
+// BankingIntegrationsConfig holds Banking Integrations service configuration
+type BankingIntegrationsConfig struct {
+	BaseURL string
+	APIKey  string
+	Timeout int
+	Enabled bool
+}
+
 var AppConfig *Config
 
 // LoadConfig loads configuration from environment variables
@@ -76,6 +94,14 @@ func LoadConfig() (*Config, error) {
 	viper.SetDefault("LOGGING_FORMAT", "json")
 	viper.SetDefault("SECURITY_API_KEY_HEADER", "X-API-Key")
 	viper.SetDefault("SECURITY_RATE_LIMIT_RPS", "100")
+	viper.SetDefault("ML_MODELS_URL", "http://localhost:9000")
+	viper.SetDefault("ML_MODELS_API_KEY", "test-api-key")
+	viper.SetDefault("ML_MODELS_ENABLED", "true")
+	viper.SetDefault("ML_MODELS_TIMEOUT", "10")
+	viper.SetDefault("BANKING_INTEGRATIONS_URL", "http://localhost:7000")
+	viper.SetDefault("BANKING_INTEGRATIONS_API_KEY", "test-api-key")
+	viper.SetDefault("BANKING_INTEGRATIONS_ENABLED", "true")
+	viper.SetDefault("BANKING_INTEGRATIONS_TIMEOUT", "10")
 
 	viper.AutomaticEnv()
 
@@ -107,6 +133,18 @@ func LoadConfig() (*Config, error) {
 			APIKeyHeader: getEnv("SECURITY_API_KEY_HEADER", "X-API-Key"),
 			JWTSecret:    getEnv("SECURITY_JWT_SECRET", "your-secret-key"),
 			RateLimitRPS: 100,
+		},
+		MLModels: MLModelsConfig{
+			BaseURL: getEnv("ML_MODELS_URL", "http://localhost:9000"),
+			APIKey:  getEnv("ML_MODELS_API_KEY", "test-api-key"),
+			Timeout: 10,
+			Enabled: getEnv("ML_MODELS_ENABLED", "true") == "true",
+		},
+		BankingIntegrations: BankingIntegrationsConfig{
+			BaseURL: getEnv("BANKING_INTEGRATIONS_URL", "http://localhost:7000"),
+			APIKey:  getEnv("BANKING_INTEGRATIONS_API_KEY", "test-api-key"),
+			Timeout: 10,
+			Enabled: getEnv("BANKING_INTEGRATIONS_ENABLED", "true") == "true",
 		},
 	}
 

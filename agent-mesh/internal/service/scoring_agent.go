@@ -69,6 +69,109 @@ func (sa *ScoringAgent) Process(ctx context.Context, req *model.AgentRequest) (*
 
 // calculateCreditScore calculates credit score
 func (sa *ScoringAgent) calculateCreditScore(ctx context.Context, context map[string]interface{}) (map[string]interface{}, float64, string) {
+	// Try to call ML Models service first
+	if sa.mlModelsEnabled {
+		result, riskScore, explanation, err := sa.callMLCreditModel(ctx, context)
+		if err == nil {
+			log.Info().Msg("Credit score from ML model")
+			return result, riskScore, explanation
+		}
+		log.Warn().Err(err).Msg("ML model call failed, using fallback")
+	}
+
+	// Fallback to rule-based calculation
+	return sa.calculateCreditScoreFallback(context)
+}
+
+// callMLCreditModel calls the ML Models service for credit scoring
+func (sa *ScoringAgent) callMLCreditModel(ctx context.Context, context map[string]interface{}) (map[string]interface{}, float64, string, error) {
+	// Extract features from context
+	accountAge := 365.0
+	if a, ok := context["account_age_days"].(float64); ok {
+		accountAge = a
+	}
+	income := 50000.0
+	if i, ok := context["income"].(float64); ok {
+		income = i
+	}
+	balance := 100000.0
+	if b, ok := context["balance"].(float64); ok {
+		balance = b
+	}
+	txnCount30d := 10.0
+	if t, ok := context["transaction_count_30d"].(float64); ok {
+		txnCount30d = t
+	}
+	delinquency := 0.0
+	if d, ok := context["delinquency_count"].(float64); ok {
+		delinquency = d
+	}
+	loanHistory := 0.0
+	if l, ok := context["loan_history_count"].(float64); ok {
+		loanHistory = l
+	}
+	avgTxnAmount := 10000.0
+	if a, ok := context["avg_transaction_amount"].(float64); ok {
+		avgTxnAmount = a
+	}
+	creditUtilization := 0.3
+	if c, ok := context["credit_utilization"].(float64); ok {
+		creditUtilization = c
+	}
+	savingsRatio := 0.2
+	if s, ok := context["savings_ratio"].(float64); ok {
+		savingsRatio = s
+	}
+
+	payload := map[string]interface{}{
+		"account_age_days":        accountAge,
+		"monthly_income":          income,
+		"total_balance":          balance,
+		"transaction_count_30d":   txnCount30d,
+		"delinquency_count":      delinquency,
+		"loan_history_count":     loanHistory,
+		"avg_transaction_amount": avgTxnAmount,
+		"credit_utilization":     creditUtilization,
+		"savings_ratio":          savingsRatio,
+	}
+
+	result, err := sa.CallMLService(ctx, "/api/v1/scoring/credit", payload)
+	if err != nil {
+		return nil, 0, "", err
+	}
+
+	// Extract credit score from response
+	if resultData, ok := result["result"].(map[string]interface{}); ok {
+		creditScore := 600.0
+		if cs, ok := resultData["credit_score"].(float64); ok {
+			creditScore = cs
+		} else if cs, ok := resultData["credit_score"].(int); ok {
+			creditScore = float64(cs)
+		}
+
+		riskScore := 1.0 - (creditScore / 850.0)
+		scoreRange := sa.getScoreRange(creditScore)
+		riskCategory := sa.getRiskCategory(riskScore)
+
+		return map[string]interface{}{
+			"credit_score":  int(creditScore),
+			"score_range":   scoreRange,
+			"risk_category": riskCategory,
+			"factors": map[string]interface{}{
+				"account_age":    accountAge,
+				"income":         income,
+				"delinquency":    delinquency,
+				"loan_history":   loanHistory,
+				"balance":        balance,
+			},
+		}, riskScore, fmt.Sprintf("Credit score calculated: %d (%s)", int(creditScore), scoreRange), nil
+	}
+
+	return nil, 0, "", fmt.Errorf("invalid response format from ML service")
+}
+
+// calculateCreditScoreFallback uses rule-based calculation as fallback
+func (sa *ScoringAgent) calculateCreditScoreFallback(context map[string]interface{}) (map[string]interface{}, float64, string) {
 	// Extract user profile data
 	accountAge, _ := context["account_age_days"].(float64)
 	income, _ := context["income"].(float64)
@@ -189,6 +292,94 @@ func (sa *ScoringAgent) calculateFraudScore(ctx context.Context, context map[str
 
 // calculateRiskScore calculates overall risk score
 func (sa *ScoringAgent) calculateRiskScore(ctx context.Context, context map[string]interface{}) (map[string]interface{}, float64, string) {
+	// Try to call ML Models service first
+	if sa.mlModelsEnabled {
+		result, riskScore, explanation, err := sa.callMLRiskModel(ctx, context)
+		if err == nil {
+			log.Info().Msg("Risk score from ML model")
+			return result, riskScore, explanation
+		}
+		log.Warn().Err(err).Msg("ML model call failed, using fallback")
+	}
+
+	// Fallback to rule-based calculation
+	return sa.calculateRiskScoreFallback(context)
+}
+
+// callMLRiskModel calls the ML Models service for risk scoring
+func (sa *ScoringAgent) callMLRiskModel(ctx context.Context, context map[string]interface{}) (map[string]interface{}, float64, string, error) {
+	// Extract features for risk model (combines credit + fraud features)
+	payload := map[string]interface{}{
+		"account_age_days":        context["account_age_days"],
+		"monthly_income":          context["income"],
+		"total_balance":          context["balance"],
+		"transaction_count_30d":   context["transaction_count_30d"],
+		"delinquency_count":      context["delinquency_count"],
+		"loan_history_count":     context["loan_history_count"],
+		"amount":                 context["amount"],
+		"hour":                   context["hour"],
+		"day_of_week":            context["day_of_week"],
+		"transaction_count_24h":  context["transaction_count_24h"],
+		"transaction_count_7d":    context["transaction_count_7d"],
+		"avg_amount_7d":           context["avg_amount_7d"],
+		"beneficiary_age_days":    context["beneficiary_age_days"],
+		"device_risk":            context["device_risk"],
+		"location_risk":          context["location_risk"],
+	}
+
+	// Set defaults for missing values
+	defaults := map[string]float64{
+		"account_age_days":        365.0,
+		"monthly_income":          50000.0,
+		"total_balance":           100000.0,
+		"transaction_count_30d":   10.0,
+		"delinquency_count":       0.0,
+		"loan_history_count":      0.0,
+		"amount":                  0.0,
+		"hour":                    12.0,
+		"day_of_week":             3.0,
+		"transaction_count_24h":   0.0,
+		"transaction_count_7d":    5.0,
+		"avg_amount_7d":           10000.0,
+		"beneficiary_age_days":    365.0,
+		"device_risk":             0.0,
+		"location_risk":           0.0,
+	}
+
+	for key, defaultValue := range defaults {
+		if payload[key] == nil {
+			payload[key] = defaultValue
+		} else if _, ok := payload[key].(float64); !ok {
+			payload[key] = defaultValue
+		}
+	}
+
+	result, err := sa.CallMLService(ctx, "/api/v1/scoring/risk", payload)
+	if err != nil {
+		return nil, 0, "", err
+	}
+
+	// Extract risk score from response
+	if resultData, ok := result["result"].(map[string]interface{}); ok {
+		overallRisk := 0.5
+		if or, ok := resultData["overall_risk"].(float64); ok {
+			overallRisk = or
+		}
+
+		riskCategory := sa.getRiskCategory(overallRisk)
+
+		return map[string]interface{}{
+			"overall_risk":  overallRisk,
+			"risk_category": riskCategory,
+			"components":    resultData["components"],
+		}, overallRisk, fmt.Sprintf("Overall risk score: %.2f (%s)", overallRisk, riskCategory), nil
+	}
+
+	return nil, 0, "", fmt.Errorf("invalid response format from ML service")
+}
+
+// calculateRiskScoreFallback uses rule-based calculation as fallback
+func (sa *ScoringAgent) calculateRiskScoreFallback(context map[string]interface{}) (map[string]interface{}, float64, string) {
 	creditScore, _ := context["credit_score"].(float64)
 	fraudScore, _ := context["fraud_score"].(float64)
 	amount, _ := context["amount"].(float64)

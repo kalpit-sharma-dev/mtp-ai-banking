@@ -79,8 +79,101 @@ func (fa *FraudAgent) Process(ctx context.Context, req *model.AgentRequest) (*mo
 	}, nil
 }
 
-// calculateFraudScore calculates fraud risk score using ML model simulation
+// calculateFraudScore calculates fraud risk score using ML model
 func (fa *FraudAgent) calculateFraudScore(ctx context.Context, amount float64, toAccount string, userID string, context map[string]interface{}) float64 {
+	// Try to call ML Models service first
+	if fa.mlModelsEnabled {
+		score, err := fa.callMLFraudModel(ctx, amount, context)
+		if err == nil {
+			log.Info().Float64("fraud_score", score).Msg("Fraud score from ML model")
+			return score
+		}
+		log.Warn().Err(err).Msg("ML model call failed, using fallback")
+	}
+
+	// Fallback to rule-based calculation
+	return fa.calculateFraudScoreFallback(amount, toAccount, userID, context)
+}
+
+// callMLFraudModel calls the ML Models service for fraud prediction
+func (fa *FraudAgent) callMLFraudModel(ctx context.Context, amount float64, context map[string]interface{}) (float64, error) {
+	// Extract features from context
+	hour := 12.0
+	if h, ok := context["hour"].(float64); ok {
+		hour = h
+	}
+	dayOfWeek := 3.0
+	if d, ok := context["day_of_week"].(float64); ok {
+		dayOfWeek = d
+	}
+	txnCount24h := 0.0
+	if t, ok := context["transaction_count_24h"].(float64); ok {
+		txnCount24h = t
+	}
+	txnCount7d := 0.0
+	if t, ok := context["transaction_count_7d"].(float64); ok {
+		txnCount7d = t
+	}
+	avgAmount7d := 10000.0
+	if a, ok := context["avg_amount_7d"].(float64); ok {
+		avgAmount7d = a
+	}
+	beneficiaryAge := 365.0
+	if b, ok := context["beneficiary_age_days"].(float64); ok {
+		beneficiaryAge = b
+	}
+	deviceRisk := 0.0
+	if d, ok := context["device_risk"].(float64); ok {
+		deviceRisk = d
+	}
+	locationRisk := 0.0
+	if l, ok := context["location_risk"].(float64); ok {
+		locationRisk = l
+	}
+	userAccountAge := 365.0
+	if u, ok := context["user_account_age_days"].(float64); ok {
+		userAccountAge = u
+	}
+	userBalance := 100000.0
+	if u, ok := context["user_balance"].(float64); ok {
+		userBalance = u
+	}
+
+	payload := map[string]interface{}{
+		"amount":                  amount,
+		"hour":                    hour,
+		"day_of_week":             dayOfWeek,
+		"transaction_count_24h":   txnCount24h,
+		"transaction_count_7d":    txnCount7d,
+		"avg_amount_7d":           avgAmount7d,
+		"beneficiary_age_days":    beneficiaryAge,
+		"device_risk":             deviceRisk,
+		"location_risk":           locationRisk,
+		"user_account_age_days":  userAccountAge,
+		"user_balance":            userBalance,
+		"is_new_beneficiary":     beneficiaryAge < 7,
+		"is_unusual_hour":         hour < 6 || hour > 23,
+		"amount_vs_avg_ratio":    amount / avgAmount7d,
+		"velocity_score":          txnCount24h / 10.0,
+	}
+
+	result, err := fa.CallMLService(ctx, "/api/v1/fraud/predict", payload)
+	if err != nil {
+		return 0, err
+	}
+
+	// Extract fraud score from response
+	if resultData, ok := result["result"].(map[string]interface{}); ok {
+		if fraudScore, ok := resultData["fraud_score"].(float64); ok {
+			return fraudScore, nil
+		}
+	}
+
+	return 0, fmt.Errorf("invalid response format from ML service")
+}
+
+// calculateFraudScoreFallback uses rule-based calculation as fallback
+func (fa *FraudAgent) calculateFraudScoreFallback(amount float64, toAccount string, userID string, context map[string]interface{}) float64 {
 	score := 0.0
 
 	// Amount-based risk
@@ -95,16 +188,16 @@ func (fa *FraudAgent) calculateFraudScore(ctx context.Context, amount float64, t
 	// New beneficiary risk
 	if beneficiaryAge, ok := context["beneficiary_age_days"].(float64); ok {
 		if beneficiaryAge < 7 {
-			score += 0.3 // New beneficiary (less than 7 days old)
+			score += 0.3
 		}
 	} else {
-		score += 0.2 // Unknown beneficiary age
+		score += 0.2
 	}
 
 	// Time-based risk (unusual hours)
 	if hour, ok := context["hour"].(float64); ok {
 		if hour < 6 || hour > 23 {
-			score += 0.15 // Unusual hours
+			score += 0.15
 		}
 	}
 
@@ -118,7 +211,7 @@ func (fa *FraudAgent) calculateFraudScore(ctx context.Context, amount float64, t
 		score += locationRisk * 0.15
 	}
 
-	// Velocity check (too many transactions)
+	// Velocity check
 	if txnCount, ok := context["transaction_count_24h"].(float64); ok {
 		if txnCount > 10 {
 			score += 0.25
@@ -127,7 +220,6 @@ func (fa *FraudAgent) calculateFraudScore(ctx context.Context, amount float64, t
 		}
 	}
 
-	// Cap at 1.0
 	if score > 1.0 {
 		score = 1.0
 	}

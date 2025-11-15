@@ -13,17 +13,41 @@ import (
 
 // LLMService handles LLM interactions for intent parsing and natural language understanding
 type LLMService struct {
-	client    *openai.Client
-	enabled   bool
-	model     string
+	client      *openai.Client
+	ollama      *OllamaService
+	enabled     bool
+	model       string
 	temperature float64
-	maxTokens int
+	maxTokens   int
+	provider    string // "openai" or "ollama"
 }
 
 // NewLLMService creates a new LLM service
 func NewLLMService(cfg *config.LLMConfig) *LLMService {
-	if !cfg.Enabled || cfg.APIKey == "" {
-		log.Info().Msg("LLM service disabled or API key not provided")
+	if !cfg.Enabled {
+		log.Info().Msg("LLM service disabled")
+		return &LLMService{
+			enabled: false,
+		}
+	}
+
+	provider := strings.ToLower(cfg.Provider)
+	if provider == "ollama" {
+		// Use Ollama service
+		ollama := NewOllamaService(cfg)
+		return &LLMService{
+			ollama:      ollama,
+			enabled:     true,
+			model:       cfg.Model,
+			temperature: cfg.Temperature,
+			maxTokens:   cfg.MaxTokens,
+			provider:    "ollama",
+		}
+	}
+
+	// Default to OpenAI
+	if cfg.APIKey == "" {
+		log.Info().Msg("LLM service disabled - API key not provided")
 		return &LLMService{
 			enabled: false,
 		}
@@ -32,9 +56,9 @@ func NewLLMService(cfg *config.LLMConfig) *LLMService {
 	var client *openai.Client
 	if cfg.BaseURL != "" {
 		// Custom base URL for self-hosted models
-		config := openai.DefaultConfig(cfg.APIKey)
-		config.BaseURL = cfg.BaseURL
-		client = openai.NewClientWithConfig(config)
+		openaiConfig := openai.DefaultConfig(cfg.APIKey)
+		openaiConfig.BaseURL = cfg.BaseURL
+		client = openai.NewClientWithConfig(openaiConfig)
 	} else {
 		// Standard OpenAI
 		client = openai.NewClient(cfg.APIKey)
@@ -46,6 +70,7 @@ func NewLLMService(cfg *config.LLMConfig) *LLMService {
 		model:       cfg.Model,
 		temperature: cfg.Temperature,
 		maxTokens:   cfg.MaxTokens,
+		provider:    "openai",
 	}
 }
 
@@ -53,6 +78,16 @@ func NewLLMService(cfg *config.LLMConfig) *LLMService {
 func (ls *LLMService) CallLLM(ctx context.Context, prompt string) (string, error) {
 	if !ls.enabled {
 		return "", fmt.Errorf("LLM service is disabled")
+	}
+
+	// Use Ollama if configured
+	if ls.provider == "ollama" && ls.ollama != nil {
+		return ls.ollama.CallLLM(ctx, prompt)
+	}
+
+	// Default to OpenAI
+	if ls.client == nil {
+		return "", fmt.Errorf("LLM client not initialized")
 	}
 
 	resp, err := ls.client.CreateChatCompletion(
@@ -92,6 +127,64 @@ func (ls *LLMService) CallLLM(ctx context.Context, prompt string) (string, error
 	}
 
 	return content, nil
+}
+
+// CallLLMWithHistory calls the LLM with conversation history (for Ollama)
+func (ls *LLMService) CallLLMWithHistory(ctx context.Context, message string, conversationHistory []map[string]string) (string, error) {
+	if !ls.enabled {
+		return "", fmt.Errorf("LLM service is disabled")
+	}
+
+	// Use Ollama if configured
+	if ls.provider == "ollama" && ls.ollama != nil {
+		prompt := ls.ollama.BuildPromptWithContext(message, conversationHistory)
+		return ls.ollama.CallLLM(ctx, prompt)
+	}
+
+	// For OpenAI, build messages from history
+	if ls.client == nil {
+		return "", fmt.Errorf("LLM client not initialized")
+	}
+
+	messages := []openai.ChatCompletionMessage{}
+	
+	// Add conversation history
+	for _, msg := range conversationHistory {
+		role := openai.ChatMessageRoleUser
+		if msg["role"] == "assistant" || msg["role"] == "bot" {
+			role = openai.ChatMessageRoleAssistant
+		}
+		messages = append(messages, openai.ChatCompletionMessage{
+			Role:    role,
+			Content: msg["content"],
+		})
+	}
+	
+	// Add current message
+	messages = append(messages, openai.ChatCompletionMessage{
+		Role:    openai.ChatMessageRoleUser,
+		Content: message,
+	})
+
+	resp, err := ls.client.CreateChatCompletion(
+		ctx,
+		openai.ChatCompletionRequest{
+			Model:       ls.model,
+			Messages:    messages,
+			Temperature: float32(ls.temperature),
+			MaxTokens:   ls.maxTokens,
+		},
+	)
+
+	if err != nil {
+		return "", fmt.Errorf("LLM API error: %w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("no response from LLM")
+	}
+
+	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
 }
 
 // ParseIntentWithLLM uses LLM to parse natural language intent
