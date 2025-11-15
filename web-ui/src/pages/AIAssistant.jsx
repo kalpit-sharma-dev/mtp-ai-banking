@@ -52,22 +52,102 @@ export default function AIAssistant() {
       console.log('Received response from orchestrator:', response)
 
       // Build response message from available fields
-      let message = response.explanation || response.message
+      let message = ''
+      const finalResult = response.final_result || {}
       
-      // If no explanation, try to get from final_result
-      if (!message && response.final_result) {
-        message = response.final_result.message || response.final_result.explanation
+      // Extract and format balance information
+      if (finalResult.balance !== undefined) {
+        const balance = finalResult.balance
+        const currency = finalResult.currency || 'INR'
+        const accountId = finalResult.account_id || finalResult.account_number || ''
+        const formattedBalance = new Intl.NumberFormat('en-IN', {
+          style: 'currency',
+          currency: currency,
+          minimumFractionDigits: 2,
+        }).format(balance)
+        
+        message = `Your account balance is **${formattedBalance}**`
+        if (accountId) {
+          message += ` (Account: ${accountId})`
+        }
+        if (finalResult.available_balance !== undefined && finalResult.available_balance !== balance) {
+          const availableBalance = new Intl.NumberFormat('en-IN', {
+            style: 'currency',
+            currency: currency,
+            minimumFractionDigits: 2,
+          }).format(finalResult.available_balance)
+          message += `\n\nAvailable Balance: ${availableBalance}`
+        }
       }
-      
-      // If still no message, construct from status
-      if (!message) {
-        const status = response.status || response.final_result?.status
-        if (status === 'APPROVED' || status === 'COMPLETED') {
-          message = 'Request processed successfully.'
-        } else if (status === 'REJECTED') {
-          message = 'Request was rejected. Please check the details and try again.'
+      // Extract transaction information
+      else if (finalResult.transaction_id) {
+        const amount = finalResult.amount
+        const currency = finalResult.currency || 'INR'
+        const formattedAmount = new Intl.NumberFormat('en-IN', {
+          style: 'currency',
+          currency: currency,
+          minimumFractionDigits: 2,
+        }).format(amount)
+        
+        message = `Transaction completed successfully!\n\n`
+        message += `Transaction ID: ${finalResult.transaction_id}\n`
+        message += `Amount: ${formattedAmount}\n`
+        if (finalResult.reference_number) {
+          message += `Reference: ${finalResult.reference_number}\n`
+        }
+        if (finalResult.to_account) {
+          message += `To Account: ${finalResult.to_account}\n`
+        }
+        if (response.explanation) {
+          message += `\n${response.explanation}`
+        }
+      }
+      // Extract statement/transactions
+      else if (finalResult.transactions && Array.isArray(finalResult.transactions)) {
+        const count = finalResult.transactions.length
+        message = `Found ${count} transaction${count !== 1 ? 's' : ''}.\n\n`
+        if (count > 0) {
+          message += 'Recent transactions:\n'
+          finalResult.transactions.slice(0, 5).forEach((txn, idx) => {
+            const amount = new Intl.NumberFormat('en-IN', {
+              style: 'currency',
+              currency: txn.currency || 'INR',
+              minimumFractionDigits: 2,
+            }).format(txn.amount || 0)
+            const date = txn.date || txn.timestamp || txn.created_at || 'N/A'
+            message += `${idx + 1}. ${txn.description || 'Transaction'}: ${amount} (${date})\n`
+          })
+          if (count > 5) {
+            message += `\n... and ${count - 5} more transaction${count - 5 !== 1 ? 's' : ''}`
+          }
+        }
+      }
+      // Extract beneficiary information
+      else if (finalResult.beneficiary_id || finalResult.beneficiaries) {
+        if (finalResult.beneficiaries && Array.isArray(finalResult.beneficiaries)) {
+          const count = finalResult.beneficiaries.length
+          message = `You have ${count} saved beneficiary${count !== 1 ? 'ies' : ''}.\n\n`
+          finalResult.beneficiaries.forEach((ben, idx) => {
+            message += `${idx + 1}. ${ben.name || 'Beneficiary'} - ${ben.account_number || ''} (${ben.ifsc || ''})\n`
+          })
         } else {
-          message = 'Request processed. Status: ' + (status || 'PENDING')
+          message = finalResult.message || 'Beneficiary operation completed successfully.'
+        }
+      }
+      // Use explanation or message if available
+      else {
+        message = response.explanation || response.message || finalResult.message || finalResult.explanation
+        
+        // If still no message, construct from status
+        if (!message) {
+          const status = response.status || finalResult.status
+          if (status === 'APPROVED' || status === 'COMPLETED') {
+            message = 'Request processed successfully.'
+          } else if (status === 'REJECTED') {
+            message = 'Request was rejected. Please check the details and try again.'
+          } else {
+            message = 'Request processed. Status: ' + (status || 'PENDING')
+          }
         }
       }
 
@@ -150,7 +230,17 @@ export default function AIAssistant() {
                     : 'bg-gray-100 text-gray-800'
                 }`}
               >
-                <p className="whitespace-pre-wrap">{message.content}</p>
+                <div className="whitespace-pre-wrap">
+                  {message.content.split('**').map((part, idx) => 
+                    idx % 2 === 1 ? (
+                      <span key={idx} className="font-bold text-lg text-primary-600">
+                        {part}
+                      </span>
+                    ) : (
+                      <span key={idx}>{part}</span>
+                    )
+                  )}
+                </div>
                 {message.data && message.data.risk_score !== undefined && (
                   <p className="text-xs mt-2 opacity-75">
                     Risk Score: {(message.data.risk_score * 100).toFixed(1)}%
