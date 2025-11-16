@@ -43,6 +43,9 @@ func main() {
 	// Initialize session service (needed for orchestrator)
 	sessionService := service.NewSessionService()
 
+	// Initialize RAG service for context-aware conversations
+	ragService := service.NewRAGService(llmService)
+
 	orchestrator := service.NewOrchestrator(
 		intentParser,
 		contextEnricher,
@@ -50,6 +53,7 @@ func main() {
 		responseMerger,
 		llmService,
 		sessionService,
+		ragService,
 	)
 
 	// Initialize controllers

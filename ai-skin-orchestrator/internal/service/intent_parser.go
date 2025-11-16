@@ -225,6 +225,26 @@ func (ip *IntentParser) initializeIntentPatterns() {
 			IntentType: model.IntentGetStatement,
 		},
 		{
+			Name: "query_last_transaction",
+			Patterns: []*regexp.Regexp{
+				regexp.MustCompile(`(?i)(?:what|which|show)\s+(?:was|is)\s+(?:my\s+)?(?:last|previous|recent)\s+transaction`),
+				regexp.MustCompile(`(?i)(?:what|which|show)\s+(?:was|is)\s+(?:the\s+)?(?:last|previous|recent)\s+transaction`),
+				regexp.MustCompile(`(?i)(?:last|previous|recent)\s+transaction`),
+				regexp.MustCompile(`(?i)what\s+(?:did\s+I\s+)?(?:transfer|send|pay)\s+(?:last|recently|recent)`),
+				regexp.MustCompile(`(?i)my\s+(?:last|previous|recent)\s+transaction`),
+				regexp.MustCompile(`(?i)what\s+(?:was|is)\s+(?:my\s+)?(?:last|previous)\s+(?:transfer|payment|transaction)`),
+			},
+			Keywords: map[string]float64{
+				"last":        1.0,
+				"previous":    0.9,
+				"recent":      0.8,
+				"transaction": 0.9,
+				"transfer":    0.8,
+				"what":        0.7,
+			},
+			IntentType: model.IntentConversational, // Route to conversational for RAG to handle
+		},
+		{
 			Name: "add_beneficiary",
 			Patterns: []*regexp.Regexp{
 				regexp.MustCompile(`(?i)add\s+(?:new\s+)?(?:payee|beneficiary)\s+(?:named\s+)?([a-zA-Z\s]+)`),

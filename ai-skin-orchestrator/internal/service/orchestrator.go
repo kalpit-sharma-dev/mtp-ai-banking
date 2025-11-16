@@ -18,6 +18,7 @@ type Orchestrator struct {
 	responseMerger   *ResponseMerger
 	llmService       *LLMService
 	sessionService   *SessionService
+	ragService       *RAGService
 }
 
 // NewOrchestrator creates a new orchestrator instance
@@ -28,6 +29,7 @@ func NewOrchestrator(
 	responseMerger *ResponseMerger,
 	llmService *LLMService,
 	sessionService *SessionService,
+	ragService *RAGService,
 ) *Orchestrator {
 	return &Orchestrator{
 		intentParser:    intentParser,
@@ -36,6 +38,7 @@ func NewOrchestrator(
 		responseMerger:  responseMerger,
 		llmService:      llmService,
 		sessionService:  sessionService,
+		ragService:      ragService,
 	}
 }
 
@@ -56,7 +59,28 @@ func (o *Orchestrator) ProcessRequest(ctx context.Context, req *model.UserReques
 	}
 
 	if intent.Type == model.IntentUnknown {
-		// Return a helpful error response instead of failing
+		// Before rejecting, check if RAG has relevant context that might help
+		// This allows RAG to handle queries that don't match standard intents
+		if o.ragService != nil {
+			// Try to retrieve relevant context
+			relevantDocs, err := o.ragService.RetrieveRelevantContext(ctx, req.UserID, req.Input, 3)
+			if err == nil && len(relevantDocs) > 0 {
+				// If we have relevant context, treat as conversational query
+				// This allows RAG to answer questions about past transactions/conversations
+				log.Info().
+					Str("user_id", req.UserID).
+					Int("relevant_docs", len(relevantDocs)).
+					Msg("Unknown intent but found relevant RAG context, treating as conversational")
+				
+				// Store user input in RAG
+				o.ragService.StoreConversation(ctx, req.UserID, req.SessionID, "user", req.Input)
+				
+				// Handle as conversational query with RAG context
+				return o.handleConversationalQuery(ctx, req)
+			}
+		}
+		
+		// Return a helpful error response if no relevant context found
 		return &model.MergedResponse{
 			Status: "REJECTED",
 			FinalResult: map[string]interface{}{
@@ -78,20 +102,33 @@ func (o *Orchestrator) ProcessRequest(ctx context.Context, req *model.UserReques
 		return o.handleConversationalQuery(ctx, req)
 	}
 
-	// Step 2: Enrich context with user history and behavior
+	// Step 2: Store user input in RAG for context awareness
+	if o.ragService != nil {
+		o.ragService.StoreConversation(ctx, req.UserID, req.SessionID, "user", req.Input)
+	}
+
+	// Step 3: Enrich context with user history and behavior
 	enrichedContext, err := o.contextEnricher.EnrichContext(ctx, req.UserID, req.SessionID, req.Channel, *intent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to enrich context: %w", err)
+	}
+
+	// Store user profile and transactions in RAG
+	if o.ragService != nil {
+		o.ragService.StoreUserContext(ctx, req.UserID, &enrichedContext.UserProfile)
+		for _, txn := range enrichedContext.TransactionHistory {
+			o.ragService.StoreTransaction(ctx, req.UserID, &txn)
+		}
 	}
 
 	log.Info().
 		Str("risk_level", enrichedContext.RiskIndicators.OverallRisk).
 		Msg("Context enriched")
 
-	// Step 3: Determine if multi-agent coordination is needed
+	// Step 4: Determine if multi-agent coordination is needed
 	_ = o.shouldUseMultiAgent(intent, enrichedContext) // Reserved for future multi-agent coordination
 
-	// Step 4: Submit task to MCP server and get response
+	// Step 5: Submit task to MCP server and get response
 	agentResponse, err := o.mcpClient.SubmitTask(ctx, req, *intent, enrichedContext)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get agent response: %w", err)
@@ -102,11 +139,59 @@ func (o *Orchestrator) ProcessRequest(ctx context.Context, req *model.UserReques
 		Float64("risk_score", agentResponse.RiskScore).
 		Msg("Received agent response")
 
-	// Step 5: If multi-agent, we would coordinate multiple agents here
+	// Step 6: Store agent response in RAG for future context
+	if o.ragService != nil {
+		// Store conversation
+		if agentResponse.Explanation != "" {
+			o.ragService.StoreConversation(ctx, req.UserID, req.SessionID, "assistant", agentResponse.Explanation)
+		}
+		
+		// Extract and store transaction if present in response
+		if agentResponse.Result != nil {
+			// Check if this is a transfer/transaction response
+			if txnID, ok := agentResponse.Result["transaction_id"].(string); ok && txnID != "" {
+				// Create transaction record from agent response
+				amount, _ := agentResponse.Result["amount"].(float64)
+				status, _ := agentResponse.Result["status"].(string)
+				if status == "" {
+					status = agentResponse.Status
+				}
+				
+				// Determine transaction type from intent
+				txnType := "TRANSFER"
+				if intent.Type == model.IntentTransferNEFT {
+					txnType = "NEFT"
+				} else if intent.Type == model.IntentTransferRTGS {
+					txnType = "RTGS"
+				} else if intent.Type == model.IntentTransferIMPS {
+					txnType = "IMPS"
+				} else if intent.Type == model.IntentTransferUPI {
+					txnType = "UPI"
+				}
+				
+				// Store transaction in RAG
+				txnRecord := &model.TransactionRecord{
+					TransactionID: txnID,
+					Type:          txnType,
+					Amount:        amount,
+					Timestamp:     agentResponse.Timestamp,
+					Status:        status,
+				}
+				o.ragService.StoreTransaction(ctx, req.UserID, txnRecord)
+				
+				log.Info().
+					Str("transaction_id", txnID).
+					Str("user_id", req.UserID).
+					Msg("Stored transaction in RAG from agent response")
+			}
+		}
+	}
+
+	// Step 7: If multi-agent, we would coordinate multiple agents here
 	// For now, we'll use single agent response
 	responses := []model.AgentResponse{*agentResponse}
 
-	// Step 6: Merge responses (even if single, for consistency)
+	// Step 8: Merge responses (even if single, for consistency)
 	mergedResponse, err := o.responseMerger.MergeResponses(responses)
 	if err != nil {
 		return nil, fmt.Errorf("failed to merge responses: %w", err)
@@ -126,7 +211,12 @@ func (o *Orchestrator) handleConversationalQuery(ctx context.Context, req *model
 	log.Info().
 		Str("user_id", req.UserID).
 		Str("input", req.Input).
-		Msg("Handling conversational query")
+		Msg("Handling conversational query with RAG")
+
+	// Store user input in RAG
+	if o.ragService != nil {
+		o.ragService.StoreConversation(ctx, req.UserID, req.SessionID, "user", req.Input)
+	}
 
 	// Get conversation history from session
 	var conversationHistory []map[string]string
@@ -140,13 +230,68 @@ func (o *Orchestrator) handleConversationalQuery(ctx context.Context, req *model
 		conversationHistory = allHistory[start:]
 	}
 
-	// Call LLM service with conversation history
+	// Build base prompt with RAG context
+	basePrompt := ""
+	if o.ragService != nil {
+		// Get user context summary
+		contextSummary, err := o.ragService.GetUserContextSummary(ctx, req.UserID)
+		if err == nil && contextSummary != "" {
+			basePrompt = contextSummary + "\n\n"
+		}
+
+		// Build RAG-augmented prompt
+		ragPrompt, err := o.ragService.BuildRAGPrompt(ctx, req.UserID, req.Input, basePrompt)
+		if err == nil {
+			basePrompt = ragPrompt
+		}
+	}
+
+	// Call LLM service with conversation history and RAG context
 	if o.llmService != nil {
-		response, err := o.llmService.CallLLMWithHistory(ctx, req.Input, conversationHistory)
+		// If we have RAG context, we need to build a custom prompt
+		var response string
+		var err error
+
+		// Build full prompt with RAG context
+		if basePrompt != "" {
+			// Add banking system prompt
+			fullPrompt := `You are a secure and intelligent AI banking assistant integrated into a digital banking system.
+
+Your role is to help users perform a wide range of banking tasks safely, efficiently, and clearly. Always ensure user intent is well-understood, confirm sensitive operations, and provide helpful, accurate guidance at every step.
+
+**IMPORTANT: Always identify yourself as a banking assistant in your responses, especially when responding to greetings or questions about your capabilities.**
+
+` + basePrompt
+
+			// Add conversation history
+			if len(conversationHistory) > 0 {
+				fullPrompt += "\n\n**Recent Conversation History:**\n"
+				for _, msg := range conversationHistory {
+					role := "User"
+					if msg["role"] == "assistant" || msg["role"] == "bot" {
+						role = "Assistant"
+					}
+					fullPrompt += fmt.Sprintf("%s: %s\n", role, msg["content"])
+				}
+				fullPrompt += "\n"
+			}
+			fullPrompt += fmt.Sprintf("User: %s\nAssistant:", req.Input)
+			
+			// Call LLM with full RAG-augmented prompt
+			response, err = o.llmService.CallLLM(ctx, fullPrompt)
+		} else {
+			// Fallback to regular history-based call
+			response, err = o.llmService.CallLLMWithHistory(ctx, req.Input, conversationHistory)
+		}
+
 		if err != nil {
 			log.Warn().Err(err).Msg("LLM service failed, using fallback response")
-			// Fallback response
 			response = o.getFallbackConversationalResponse(req.Input)
+		}
+
+		// Store assistant response in RAG
+		if o.ragService != nil {
+			o.ragService.StoreConversation(ctx, req.UserID, req.SessionID, "assistant", response)
 		}
 
 		return &model.MergedResponse{
@@ -163,6 +308,12 @@ func (o *Orchestrator) handleConversationalQuery(ctx context.Context, req *model
 
 	// Fallback if LLM service not available
 	response := o.getFallbackConversationalResponse(req.Input)
+	
+	// Store fallback response in RAG
+	if o.ragService != nil {
+		o.ragService.StoreConversation(ctx, req.UserID, req.SessionID, "assistant", response)
+	}
+
 	return &model.MergedResponse{
 		Status: "APPROVED",
 		FinalResult: map[string]interface{}{
