@@ -144,6 +144,75 @@ func (o *Orchestrator) executeTask(ctx context.Context, task *model.Task, decisi
 		return
 	}
 
+	log.Info().
+		Str("task_id", task.TaskID).
+		Str("agent_type", string(agent.Type)).
+		Interface("result", result).
+		Msg("Agent response received")
+
+	// For transfers, if Guardrail approves, chain to Banking agent to execute
+	if task.Intent == "TRANSFER_NEFT" || task.Intent == "TRANSFER_RTGS" || 
+	   task.Intent == "TRANSFER_IMPS" || task.Intent == "TRANSFER_UPI" {
+		if agent.Type == model.AgentTypeGuardrail {
+			// Check if guardrail approved - check both result["status"] and result["all_passed"]
+			statusApproved := false
+			if status, ok := result["status"].(string); ok && status == "APPROVED" {
+				statusApproved = true
+			}
+			// Also check all_passed field from guardrail checks
+			allPassed := false
+			if passed, ok := result["all_passed"].(bool); ok && passed {
+				allPassed = true
+			}
+			
+			if statusApproved || allPassed {
+				// Chain to Banking agent to execute the transfer
+				bankingAgents, err := o.agentRegistry.FindAgentsByType(ctx, model.AgentTypeBanking)
+				if err == nil && len(bankingAgents) > 0 {
+					bankingAgent := bankingAgents[0]
+					log.Info().
+						Str("task_id", task.TaskID).
+						Str("banking_agent", bankingAgent.AgentID).
+						Bool("status_approved", statusApproved).
+						Bool("all_passed", allPassed).
+						Msg("✅ Guardrail approved, chaining to Banking agent")
+					
+					// Call Banking agent with same request
+					bankingResult, bankingRiskScore, bankingExplanation, err := o.callAgent(ctx, bankingAgent, agentRequest)
+					if err != nil {
+						log.Error().
+							Err(err).
+							Str("task_id", task.TaskID).
+							Msg("❌ Failed to call Banking agent after Guardrail approval")
+						o.taskManager.UpdateTaskStatus(ctx, task.TaskID, model.TaskStatusFailed, nil, fmt.Sprintf("Guardrail approved but Banking agent failed: %s", err.Error()))
+						return
+					}
+					
+					// Use Banking agent result (which has transaction_id, etc.)
+					result = bankingResult
+					riskScore = bankingRiskScore
+					explanation = bankingExplanation
+					
+					log.Info().
+						Str("task_id", task.TaskID).
+						Interface("banking_result", bankingResult).
+						Str("explanation", bankingExplanation).
+						Msg("✅ Banking agent executed transfer successfully")
+				} else {
+					log.Error().
+						Str("task_id", task.TaskID).
+						Msg("❌ No Banking agent found to execute transfer")
+				}
+			} else {
+				// Guardrail rejected, stop here
+				log.Info().
+					Str("task_id", task.TaskID).
+					Interface("guardrail_result", result).
+					Msg("❌ Guardrail rejected transfer, not chaining to Banking agent")
+			}
+		}
+	}
+
 	// Update task with result
 	if err := o.taskManager.UpdateTaskResult(ctx, task.TaskID, result, riskScore, explanation); err != nil {
 		log.Error().Err(err).Str("task_id", task.TaskID).Msg("Failed to update task result")

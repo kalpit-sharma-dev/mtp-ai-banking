@@ -196,20 +196,53 @@ func (ab *AgentBase) CallBankingService(ctx context.Context, endpoint string, pa
 		httpReq.Header.Set("X-API-Key", ab.bankingIntegrationsKey)
 	}
 
+	log.Info().
+		Str("url", url).
+		Interface("payload", payload).
+		Str("banking_integrations_url", ab.bankingIntegrationsURL).
+		Bool("enabled", ab.bankingIntegrationsEnabled).
+		Msg("Calling Banking Integrations service")
+	
 	resp, err := ab.httpClient.Do(httpReq)
 	if err != nil {
+		log.Error().
+			Err(err).
+			Str("url", url).
+			Str("full_url", url).
+			Str("base_url", ab.bankingIntegrationsURL).
+			Msg("❌ CRITICAL: Failed to call Banking Integrations service - check if service is running on port 7000")
 		return nil, fmt.Errorf("failed to call banking service: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.Error().
+			Err(err).
+			Str("url", url).
+			Msg("Failed to read Banking Integrations response")
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("banking service error: %s", string(respBody))
+	// Accept both 200 (OK) and 201 (Created) as success status codes
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		log.Error().
+			Int("status_code", resp.StatusCode).
+			Str("url", url).
+			Str("response", string(respBody)).
+			Msg("❌ Banking Integrations service returned error status")
+		return nil, fmt.Errorf("banking service error (status %d): %s", resp.StatusCode, string(respBody))
 	}
+	
+	responsePreview := string(respBody)
+	if len(responsePreview) > 100 {
+		responsePreview = responsePreview[:100] + "..."
+	}
+	log.Info().
+		Str("url", url).
+		Int("status_code", resp.StatusCode).
+		Str("response_preview", responsePreview).
+		Msg("✅ Banking Integrations service call successful")
 
 	var result map[string]interface{}
 	if err := json.Unmarshal(respBody, &result); err != nil {

@@ -29,10 +29,14 @@ export default function Transfer() {
       const response = await orchestratorAPI.processRequest(transferText, user.id, user.channel)
 
       if (response.status === 'APPROVED' || response.final_result?.status === 'APPROVED') {
+        const finalResult = response.final_result || {}
+        const transactionId = finalResult.transaction_id || response.transaction_id
+        const amount = finalResult.amount || parseFloat(formData.amount)
+        
         setResult({
           success: true,
-          transaction_id: response.final_result?.transaction_id || response.transaction_id,
-          message: response.explanation || response.final_result?.message || 'Transfer completed successfully',
+          transaction_id: transactionId,
+          message: response.explanation || finalResult.message || 'Transfer completed successfully',
           risk_score: response.risk_score,
         })
         setFormData({
@@ -42,6 +46,16 @@ export default function Transfer() {
           transfer_type: 'NEFT',
           remarks: '',
         })
+        
+        // Trigger refresh events for other pages
+        window.dispatchEvent(new CustomEvent('transactionCompleted', { 
+          detail: { 
+            transactionId,
+            amount,
+            toAccount: finalResult.to_account || formData.to_account 
+          } 
+        }))
+        window.dispatchEvent(new CustomEvent('balanceUpdated'))
       } else {
         setError(response.explanation || response.final_result?.message || 'Transfer was not approved')
       }

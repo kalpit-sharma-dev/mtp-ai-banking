@@ -11,6 +11,18 @@ export default function Balance() {
 
   useEffect(() => {
     loadBalance()
+    
+    // Listen for balance updated events from transfers
+    const handleBalanceUpdated = () => {
+      console.log('Balance updated, refreshing...')
+      loadBalance()
+    }
+    
+    window.addEventListener('balanceUpdated', handleBalanceUpdated)
+    
+    return () => {
+      window.removeEventListener('balanceUpdated', handleBalanceUpdated)
+    }
   }, [])
 
   const loadBalance = async () => {

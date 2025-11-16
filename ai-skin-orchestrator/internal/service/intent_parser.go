@@ -80,8 +80,16 @@ func (ip *IntentParser) parseStructuredInput(input string) (*model.Intent, error
 func (ip *IntentParser) parseWithLLM(ctx context.Context, userInput string) (*model.Intent, error) {
 	prompt := fmt.Sprintf(`Analyze the following banking request and extract:
 1. Intent type (one of: TRANSFER_NEFT, TRANSFER_RTGS, TRANSFER_IMPS, TRANSFER_UPI, CHECK_BALANCE, GET_STATEMENT, ADD_BENEFICIARY, APPLY_LOAN, CREDIT_SCORE, CONVERSATIONAL)
-2. Entities (amount, account number, beneficiary, etc.)
+2. Entities - extract ALL available information:
+   - For transfers: amount, to_account, ifsc, transfer_type
+   - For ADD_BENEFICIARY: name (or payee_name), account_number (or account), ifsc
+   - For other intents: relevant fields
 3. Confidence score (0.0 to 1.0)
+
+IMPORTANT: For ADD_BENEFICIARY, extract ALL three required fields if present:
+- name/payee_name: beneficiary name
+- account_number/account: account number
+- ifsc: IFSC code
 
 Note: If the request is a greeting (hello, hi, how are you), question about capabilities (what can you do, what operations do you support), or a conversational query, use intent: "CONVERSATIONAL".
 
@@ -93,7 +101,10 @@ Respond in JSON format:
   "confidence": 0.95,
   "entities": {
     "amount": 50000,
-    "to_account": "XXXX4321"
+    "to_account": "XXXX4321",
+    "ifsc": "BANK0001234",
+    "name": "John Doe",
+    "account_number": "1234567890"
   }
 }`, userInput)
 
@@ -453,15 +464,46 @@ func (ip *IntentParser) extractEntities(message string, pattern *IntentPattern) 
 		entities["amount"] = amountStr
 	}
 
-	// Extract account number
-	accountRegex := regexp.MustCompile(`(?i)(?:account|acc|ac)\s*(?:no|number|#)?\s*:?\s*([\dX]{4,})`)
-	if matches := accountRegex.FindStringSubmatch(message); len(matches) > 1 {
-		entities["to_account"] = matches[1]
+	// Extract account number (for transfers and beneficiaries)
+	// Pattern 1: "account number - 1234567890" or "account number: 1234567890" or "account number 1234567890"
+	accountRegex1 := regexp.MustCompile(`(?i)(?:account|acc|ac)\s*(?:no|number|#)?\s*[-:]?\s*([\dX]+)`)
+	// Pattern 2: Just numbers (any length) that might be account numbers (but not IFSC)
+	accountRegex2 := regexp.MustCompile(`\b(\d{4,16})\b`)
+	
+	if matches := accountRegex1.FindStringSubmatch(message); len(matches) > 1 {
+		accountNum := strings.TrimSpace(matches[1])
+		// For beneficiaries, use account_number; for transfers, use to_account
+		if pattern != nil && pattern.IntentType == model.IntentAddBeneficiary {
+			entities["account_number"] = accountNum
+			entities["account"] = accountNum
+		} else {
+			entities["to_account"] = accountNum
+		}
+	} else if pattern != nil && pattern.IntentType == model.IntentAddBeneficiary {
+		// For beneficiaries, try to find any number that might be account number
+		// But exclude IFSC codes (11 chars) and very short numbers (< 4 digits) unless explicitly labeled
+		if matches := accountRegex2.FindStringSubmatch(message); len(matches) > 1 {
+			accountNum := matches[1]
+			// Don't use if it's an IFSC code format (11 chars starting with 4 letters)
+			ifscCheck := regexp.MustCompile(`^[A-Z]{4}0[A-Z0-9]{6}$`)
+			if !ifscCheck.MatchString(strings.ToUpper(accountNum)) {
+				entities["account_number"] = accountNum
+				entities["account"] = accountNum
+			}
+		}
 	}
 
 	// Extract IFSC code
-	ifscRegex := regexp.MustCompile(`(?i)ifsc\s*:?\s*([A-Z]{4}0[A-Z0-9]{6})`)
-	if matches := ifscRegex.FindStringSubmatch(message); len(matches) > 1 {
+	// Pattern 1: "IFSC code - BANK0001234" or "IFSC: BANK0001234" or "IFSC BANK0001234"
+	ifscRegex1 := regexp.MustCompile(`(?i)ifsc\s*(?:code)?\s*[-:]?\s*([A-Z0-9]+)`)
+	// Pattern 2: Just the IFSC code format (4 letters, 0, 6 alphanumeric) - standard format
+	ifscRegex2 := regexp.MustCompile(`\b([A-Z]{4}0[A-Z0-9]{6})\b`)
+	
+	if matches := ifscRegex1.FindStringSubmatch(message); len(matches) > 1 {
+		ifscCode := strings.TrimSpace(strings.ToUpper(matches[1]))
+		// Accept any value after "IFSC" label, even if not standard format
+		entities["ifsc"] = ifscCode
+	} else if matches := ifscRegex2.FindStringSubmatch(strings.ToUpper(message)); len(matches) > 1 {
 		entities["ifsc"] = matches[1]
 	}
 
@@ -472,31 +514,43 @@ func (ip *IntentParser) extractEntities(message string, pattern *IntentPattern) 
 	}
 
 	// Extract payee/beneficiary name
-	if pattern != nil && (pattern.IntentType == model.IntentAddBeneficiary || pattern.IntentType == model.IntentTransferNEFT || pattern.IntentType == model.IntentTransferRTGS || pattern.IntentType == model.IntentTransferIMPS) {
+	if pattern != nil && (pattern.IntentType == model.IntentAddBeneficiary || pattern.IntentType == model.IntentTransferNEFT || pattern.IntentType == model.IntentTransferRTGS || pattern.IntentType == model.IntentTransferIMPS || pattern.IntentType == model.IntentTransferUPI) {
 		// Try multiple patterns for beneficiary name
-		// Pattern 1: "add beneficiary [Name]"
-		nameRegex1 := regexp.MustCompile(`(?i)add\s+(?:new\s+)?(?:payee|beneficiary)\s+(?:named\s+)?([a-zA-Z\s]{2,})`)
-		// Pattern 2: "to [Name]" or "for [Name]"
-		nameRegex2 := regexp.MustCompile(`(?i)(?:to|for|payee|beneficiary|named)\s+([a-zA-Z\s]{2,})`)
-		// Pattern 3: "[Name] account" (name before account number)
-		nameRegex3 := regexp.MustCompile(`(?i)^([a-zA-Z\s]{2,})\s+(?:account|acc)`)
+		// Pattern 1: "add beneficiary [Name]" or "add beneficiary named [Name]"
+		nameRegex1 := regexp.MustCompile(`(?i)add\s+(?:new\s+)?(?:payee|beneficiary)\s+(?:named\s+)?([a-zA-Z\s]+)`)
+		// Pattern 2: "name - [Name]" or "name: [Name]" or "beneficiary name - [Name]"
+		nameRegex2 := regexp.MustCompile(`(?i)(?:beneficiary\s+)?name\s*[-:]?\s*([a-zA-Z\s]+)`)
+		// Pattern 3: "to [Name]" or "for [Name]" - IMPORTANT for transfers like "transfer 10000 to K"
+		nameRegex3 := regexp.MustCompile(`(?i)(?:to|for|payee|beneficiary|named)\s+([a-zA-Z\s]+)`)
+		// Pattern 4: "[Name] account" (name before account number)
+		nameRegex4 := regexp.MustCompile(`(?i)^([a-zA-Z\s]+)\s+(?:account|acc)`)
 		
+		var extractedName string
 		if matches := nameRegex1.FindStringSubmatch(message); len(matches) > 1 {
 			// Extract name and remove any trailing words like "account", "with", etc.
-			name := strings.TrimSpace(matches[1])
+			extractedName = strings.TrimSpace(matches[1])
 			// Remove common trailing words
-			name = regexp.MustCompile(`(?i)\s+(?:account|acc|with|having|details?)$`).ReplaceAllString(name, "")
-			entities["payee_name"] = name
-			entities["name"] = name // Also set as "name" for consistency
+			extractedName = regexp.MustCompile(`(?i)\s+(?:account|acc|with|having|details?|number|code)$`).ReplaceAllString(extractedName, "")
 		} else if matches := nameRegex2.FindStringSubmatch(message); len(matches) > 1 {
-			name := strings.TrimSpace(matches[1])
-			name = regexp.MustCompile(`(?i)\s+(?:account|acc|with|having|details?)$`).ReplaceAllString(name, "")
-			entities["payee_name"] = name
-			entities["name"] = name
+			extractedName = strings.TrimSpace(matches[1])
+			// Remove trailing words like "account number", "IFSC code", etc.
+			extractedName = regexp.MustCompile(`(?i)\s*,\s*(?:account|acc|ifsc).*$`).ReplaceAllString(extractedName, "")
+			extractedName = regexp.MustCompile(`(?i)\s+(?:account|acc|with|having|details?|number|code)$`).ReplaceAllString(extractedName, "")
 		} else if matches := nameRegex3.FindStringSubmatch(message); len(matches) > 1 {
-			name := strings.TrimSpace(matches[1])
-			entities["payee_name"] = name
-			entities["name"] = name
+			extractedName = strings.TrimSpace(matches[1])
+			extractedName = regexp.MustCompile(`(?i)\s+(?:account|acc|with|having|details?|number|code)$`).ReplaceAllString(extractedName, "")
+		} else if matches := nameRegex4.FindStringSubmatch(message); len(matches) > 1 {
+			extractedName = strings.TrimSpace(matches[1])
+		}
+		
+		if extractedName != "" {
+			entities["payee_name"] = extractedName
+			entities["name"] = extractedName
+			// For transfers, also set as to_account
+			if pattern.IntentType == model.IntentTransferNEFT || pattern.IntentType == model.IntentTransferRTGS || 
+			   pattern.IntentType == model.IntentTransferIMPS || pattern.IntentType == model.IntentTransferUPI {
+				entities["to_account"] = extractedName
+			}
 		}
 	}
 

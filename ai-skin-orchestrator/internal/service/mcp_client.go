@@ -86,8 +86,24 @@ func (mc *MCPClient) SubmitTask(ctx context.Context, req *model.UserRequest, int
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	// Wait a bit and get the result
-	time.Sleep(2 * time.Second)
+	// Wait for task to complete with retries
+	maxRetries := 10
+	retryDelay := 500 * time.Millisecond
+	
+	for i := 0; i < maxRetries; i++ {
+		time.Sleep(retryDelay)
+		result, err := mc.GetTaskResult(ctx, taskResp.TaskID)
+		if err == nil {
+			// Check if task is completed
+			if result.Status == "APPROVED" || result.Status == "REJECTED" || result.Status == "COMPLETED" {
+				return result, nil
+			}
+			// If still processing, wait and retry
+		}
+		// If error or still processing, retry
+	}
+	
+	// Final attempt
 	return mc.GetTaskResult(ctx, taskResp.TaskID)
 }
 

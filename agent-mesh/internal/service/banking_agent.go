@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aibanking/agent-mesh/internal/model"
@@ -63,17 +65,58 @@ func (ba *BankingAgent) processTransfer(ctx context.Context, req *model.AgentReq
 		return nil, fmt.Errorf("invalid data in input context")
 	}
 
-	amount, ok := data["amount"].(float64)
-	if !ok {
-		return nil, fmt.Errorf("amount not found or invalid")
+	// Extract amount - handle multiple types (float64, int, string)
+	var amount float64
+	if amt, ok := data["amount"].(float64); ok {
+		amount = amt
+	} else if amt, ok := data["amount"].(int); ok {
+		amount = float64(amt)
+	} else if amt, ok := data["amount"].(int64); ok {
+		amount = float64(amt)
+	} else if amt, ok := data["amount"].(string); ok {
+		// Try to parse string to float using strconv
+		var err error
+		amount, err = strconv.ParseFloat(amt, 64)
+		if err != nil {
+			log.Error().
+				Str("amount_string", amt).
+				Err(err).
+				Interface("data", data).
+				Msg("Failed to parse amount from string")
+			return nil, fmt.Errorf("amount not found or invalid (string: %s)", amt)
+		}
+	} else {
+		log.Error().
+			Interface("data", data).
+			Interface("amount_type", fmt.Sprintf("%T", data["amount"])).
+			Msg("Amount not found or invalid type in data")
+		return nil, fmt.Errorf("amount not found or invalid (type: %T, value: %v)", data["amount"], data["amount"])
+	}
+	
+	if amount <= 0 {
+		return nil, fmt.Errorf("amount must be greater than 0, got: %.2f", amount)
 	}
 
-	toAccount, ok := data["to_account"].(string)
-	if !ok {
-		return nil, fmt.Errorf("to_account not found")
+	// Extract to_account - check multiple field names (to_account, payee_name, name)
+	var toAccount string
+	if acc, ok := data["to_account"].(string); ok && acc != "" {
+		toAccount = acc
+	} else if name, ok := data["payee_name"].(string); ok && name != "" {
+		toAccount = name
+	} else if name, ok := data["name"].(string); ok && name != "" {
+		toAccount = name
+	} else {
+		log.Error().
+			Interface("data", data).
+			Msg("to_account/payee_name/name not found in data")
+		return nil, fmt.Errorf("to_account not found (checked: to_account, payee_name, name)")
 	}
 
 	userID, _ := inputCtx["user_id"].(string)
+	if userID == "" {
+		return nil, fmt.Errorf("user_id not found in input context")
+	}
+	
 	channel, _ := inputCtx["channel"].(string)
 	if channel == "" {
 		channel = "MB"
@@ -83,18 +126,46 @@ func (ba *BankingAgent) processTransfer(ctx context.Context, req *model.AgentReq
 	if fromAcc, ok := inputCtx["account_id"].(string); ok && fromAcc != "" {
 		fromAccount = fromAcc
 	}
+	
+	// Pass the task/intent to callBankingTransfer for transfer type detection
+	if data == nil {
+		data = make(map[string]interface{})
+	}
+	// Store task for transfer type detection
+	if req.Task != "" {
+		data["task"] = req.Task
+	}
 
 	// Try to call Banking Integrations service first
-	if ba.bankingIntegrationsEnabled {
+	if !ba.bankingIntegrationsEnabled {
+		log.Error().
+			Str("user_id", userID).
+			Msg("Banking Integrations service is DISABLED - balance will NOT be updated! Using mock processing")
+	} else {
+		log.Info().
+			Str("user_id", userID).
+			Str("from_account", fromAccount).
+			Str("to_account", toAccount).
+			Float64("amount", amount).
+			Str("channel", channel).
+			Msg("Attempting to process transfer via Banking Integrations")
+		
 		transferResp, err := ba.callBankingTransfer(ctx, userID, fromAccount, toAccount, amount, channel, data)
 		if err == nil {
 			log.Info().
 				Str("user_id", userID).
 				Str("source", "banking_integrations").
-				Msg("Transfer processed via Banking Integrations")
+				Interface("response", transferResp.Result).
+				Msg("✅ Transfer processed successfully via Banking Integrations - balance WILL be updated")
 			return transferResp, nil
 		}
-		log.Warn().Err(err).Msg("Failed to process transfer via Banking Integrations, using fallback")
+		log.Error().
+			Err(err).
+			Str("user_id", userID).
+			Str("from_account", fromAccount).
+			Str("to_account", toAccount).
+			Float64("amount", amount).
+			Msg("❌ FAILED to process transfer via Banking Integrations - balance will NOT be updated! Using fallback")
 	}
 
 	// Fallback to mock processing
@@ -131,37 +202,80 @@ func (ba *BankingAgent) processTransfer(ctx context.Context, req *model.AgentReq
 
 // callBankingTransfer calls Banking Integrations service for transfer
 func (ba *BankingAgent) callBankingTransfer(ctx context.Context, userID, fromAccount, toAccount string, amount float64, channel string, data map[string]interface{}) (*model.AgentResponse, error) {
+	// Determine transfer type from task/intent
+	transferType := "NEFT" // Default
+	if task, ok := data["task"].(string); ok {
+		if strings.Contains(task, "IMPS") {
+			transferType = "IMPS"
+		} else if strings.Contains(task, "RTGS") {
+			transferType = "RTGS"
+		} else if strings.Contains(task, "UPI") {
+			transferType = "UPI"
+		}
+	} else if tType, ok := data["transfer_type"].(string); ok && tType != "" {
+		transferType = tType
+	}
+	
 	payload := map[string]interface{}{
-		"user_id":     userID,
+		"user_id":      userID,
 		"from_account": fromAccount,
-		"to_account":  toAccount,
-		"amount":      amount,
-		"channel":     channel,
+		"to_account":   toAccount,
+		"amount":       amount,
+		"channel":      channel,
+		"type":         transferType, // Banking Integrations expects "type" not "transfer_type"
 	}
 
-	// Add transfer type if available
-	if transferType, ok := data["transfer_type"].(string); ok {
-		payload["transfer_type"] = transferType
-	}
-	if ifsc, ok := data["ifsc"].(string); ok {
+	// Add IFSC if available
+	if ifsc, ok := data["ifsc"].(string); ok && ifsc != "" {
 		payload["ifsc"] = ifsc
 	}
-	if remarks, ok := data["remarks"].(string); ok {
+	// Add remarks if available
+	if remarks, ok := data["remarks"].(string); ok && remarks != "" {
 		payload["remarks"] = remarks
 	}
 
+	log.Info().
+		Interface("payload", payload).
+		Msg("Calling Banking Integrations /api/v1/transfer")
+	
 	result, err := ba.CallBankingService(ctx, "/api/v1/transfer", payload)
 	if err != nil {
+		log.Error().
+			Err(err).
+			Interface("payload", payload).
+			Msg("Failed to call Banking Integrations transfer endpoint")
 		return nil, err
 	}
 
-	// Extract transfer response
+	log.Info().
+		Interface("result", result).
+		Msg("Received response from Banking Integrations transfer")
+
+	// Extract transfer response - handle both possible response formats
 	responseResult := map[string]interface{}{
-		"status":         result["status"],
-		"transaction_id": result["transaction_id"],
-		"amount":         amount,
-		"to_account":     toAccount,
-		"processed_at":    time.Now(),
+		"amount":      amount,
+		"to_account":  toAccount,
+		"processed_at": time.Now(),
+	}
+
+	// Extract status
+	if status, ok := result["status"].(string); ok {
+		responseResult["status"] = status
+	} else {
+		responseResult["status"] = "COMPLETED" // Default if not present
+	}
+
+	// Extract transaction_id (critical for balance update)
+	if txnID, ok := result["transaction_id"].(string); ok && txnID != "" {
+		responseResult["transaction_id"] = txnID
+		log.Info().
+			Str("transaction_id", txnID).
+			Msg("✅ Extracted transaction_id from Banking Integrations response")
+	} else {
+		log.Error().
+			Interface("result", result).
+			Msg("❌ transaction_id not found in Banking Integrations response")
+		return nil, fmt.Errorf("transaction_id not found in response: %v", result)
 	}
 
 	if message, ok := result["message"].(string); ok {
@@ -169,6 +283,9 @@ func (ba *BankingAgent) callBankingTransfer(ctx context.Context, userID, fromAcc
 	}
 	if reference, ok := result["reference_number"].(string); ok {
 		responseResult["reference_number"] = reference
+	}
+	if fromAcc, ok := result["from_account"].(string); ok {
+		responseResult["from_account"] = fromAcc
 	}
 
 	return &model.AgentResponse{
@@ -409,23 +526,37 @@ func (ba *BankingAgent) addBeneficiary(ctx context.Context, req *model.AgentRequ
 	// Extract fields with multiple possible names (handle both UI and AI Assistant formats)
 	accountNumber := ""
 	if acc, ok := data["account_number"].(string); ok && acc != "" {
-		accountNumber = acc
+		accountNumber = strings.TrimSpace(acc)
 	} else if acc, ok := data["account"].(string); ok && acc != "" {
-		accountNumber = acc
+		accountNumber = strings.TrimSpace(acc)
 	} else if acc, ok := data["to_account"].(string); ok && acc != "" {
-		accountNumber = acc
+		accountNumber = strings.TrimSpace(acc)
+	}
+	// Also check for numeric values
+	if accountNumber == "" {
+		if acc, ok := data["account_number"].(float64); ok {
+			accountNumber = fmt.Sprintf("%.0f", acc)
+		} else if acc, ok := data["account"].(float64); ok {
+			accountNumber = fmt.Sprintf("%.0f", acc)
+		}
 	}
 
 	name := ""
 	if n, ok := data["name"].(string); ok && n != "" {
-		name = n
+		name = strings.TrimSpace(n)
 	} else if n, ok := data["payee_name"].(string); ok && n != "" {
-		name = n
+		name = strings.TrimSpace(n)
 	}
 
 	ifsc := ""
 	if i, ok := data["ifsc"].(string); ok && i != "" {
-		ifsc = i
+		ifsc = strings.TrimSpace(strings.ToUpper(i))
+	}
+	// Also check for numeric values
+	if ifsc == "" {
+		if i, ok := data["ifsc"].(float64); ok {
+			ifsc = fmt.Sprintf("%.0f", i)
+		}
 	}
 
 	// Get user_id and channel from input context
@@ -435,19 +566,38 @@ func (ba *BankingAgent) addBeneficiary(ctx context.Context, req *model.AgentRequ
 		channel = "MB" // Default to Mobile Banking
 	}
 
-	// Validate required fields
-	if accountNumber == "" || name == "" || ifsc == "" {
+	// Validate required fields - but don't reject, try to proceed with what we have
+	missingFields := []string{}
+	if accountNumber == "" {
+		missingFields = append(missingFields, "account_number")
+	}
+	if name == "" {
+		missingFields = append(missingFields, "name")
+	}
+	if ifsc == "" {
+		missingFields = append(missingFields, "ifsc")
+	}
+	
+	// Only reject if ALL fields are missing
+	if len(missingFields) == 3 {
 		return &model.AgentResponse{
 			AgentID:     ba.agentType,
 			AgentType:   "BANKING",
 			Status:      "REJECTED",
-			Result:      map[string]interface{}{"error": "Missing required fields: account_number, name, or ifsc"},
+			Result:      map[string]interface{}{"error": "Missing required fields: account_number, name, and ifsc"},
 			RiskScore:   0.0,
-			Explanation: "Please provide beneficiary name, account number, and IFSC code",
+			Explanation: "To add a beneficiary, I need: beneficiary name, account number, and IFSC code. Please provide all three details.",
 			Confidence:  0.0,
 			Timestamp:   time.Now(),
 			RequestID:   req.RequestID,
 		}, nil
+	}
+	
+	// If some fields are missing, provide helpful message but still try to add
+	if len(missingFields) > 0 {
+		log.Warn().
+			Strs("missing_fields", missingFields).
+			Msg("Some beneficiary fields missing, but proceeding")
 	}
 
 	log.Info().

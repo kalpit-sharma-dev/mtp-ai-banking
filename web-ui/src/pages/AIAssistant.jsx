@@ -144,29 +144,6 @@ export default function AIAssistant() {
       else if (finalResult.type === 'conversational' || finalResult.message) {
         message = finalResult.message || response.explanation || 'I\'m here to help you with your banking needs!'
       }
-      // Extract transaction information
-      else if (finalResult.transaction_id) {
-        const amount = finalResult.amount
-        const currency = finalResult.currency || 'INR'
-        const formattedAmount = new Intl.NumberFormat('en-IN', {
-          style: 'currency',
-          currency: currency,
-          minimumFractionDigits: 2,
-        }).format(amount)
-        
-        message = `Transaction completed successfully!\n\n`
-        message += `Transaction ID: ${finalResult.transaction_id}\n`
-        message += `Amount: ${formattedAmount}\n`
-        if (finalResult.reference_number) {
-          message += `Reference: ${finalResult.reference_number}\n`
-        }
-        if (finalResult.to_account) {
-          message += `To Account: ${finalResult.to_account}\n`
-        }
-        if (response.explanation) {
-          message += `\n${response.explanation}`
-        }
-      }
       // Extract statement/transactions
       else if (finalResult.transactions && Array.isArray(finalResult.transactions)) {
         const count = finalResult.transactions.length
@@ -208,9 +185,47 @@ export default function AIAssistant() {
           if (ifsc) message += `IFSC: ${ifsc}\n`
           if (beneficiaryId) message += `Beneficiary ID: ${beneficiaryId}\n`
           if (finalResult.bank_name) message += `Bank: ${finalResult.bank_name}\n`
+          
+          // Trigger refresh event for Beneficiaries page
+          window.dispatchEvent(new CustomEvent('beneficiaryAdded', { 
+            detail: { beneficiaryId, name, account, ifsc } 
+          }))
         } else {
           message = finalResult.message || 'Beneficiary operation completed successfully.'
         }
+      }
+      // Extract transfer/transaction information
+      else if (finalResult.transaction_id) {
+        const amount = finalResult.amount
+        const currency = finalResult.currency || 'INR'
+        const formattedAmount = new Intl.NumberFormat('en-IN', {
+          style: 'currency',
+          currency: currency,
+          minimumFractionDigits: 2,
+        }).format(amount)
+        
+        message = `Transaction completed successfully!\n\n`
+        message += `Transaction ID: ${finalResult.transaction_id}\n`
+        message += `Amount: ${formattedAmount}\n`
+        if (finalResult.reference_number) {
+          message += `Reference: ${finalResult.reference_number}\n`
+        }
+        if (finalResult.to_account) {
+          message += `To Account: ${finalResult.to_account}\n`
+        }
+        if (response.explanation) {
+          message += `\n${response.explanation}`
+        }
+        
+        // Trigger refresh events for other pages
+        window.dispatchEvent(new CustomEvent('transactionCompleted', { 
+          detail: { 
+            transactionId: finalResult.transaction_id,
+            amount,
+            toAccount: finalResult.to_account 
+          } 
+        }))
+        window.dispatchEvent(new CustomEvent('balanceUpdated'))
       }
       // Use explanation or message if available
       else {

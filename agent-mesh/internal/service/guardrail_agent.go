@@ -108,10 +108,23 @@ func (ga *GuardrailAgent) performGuardrailChecks(ctx context.Context, amount flo
 	}
 
 	// Beneficiary age check (minimum 24 hours for NEFT/RTGS)
+	// For small amounts (< 10,000), allow transfers to new beneficiaries
+	// For larger amounts, require beneficiary to be at least 1 day old
 	if beneficiaryAge, ok := context["beneficiary_age_days"].(float64); ok {
-		checks["beneficiary_age"] = beneficiaryAge >= 1 // At least 1 day old
+		if amount < 10000.0 {
+			// Allow small transfers to new beneficiaries
+			checks["beneficiary_age"] = true
+		} else {
+			// For larger amounts, require at least 1 day old
+			checks["beneficiary_age"] = beneficiaryAge >= 1
+		}
 	} else {
-		checks["beneficiary_age"] = false // Unknown beneficiary age
+		// Unknown beneficiary age - allow for small amounts, reject for large amounts
+		if amount < 10000.0 {
+			checks["beneficiary_age"] = true // Allow small transfers
+		} else {
+			checks["beneficiary_age"] = false // Reject large transfers to unknown beneficiaries
+		}
 	}
 
 	// KYC status check

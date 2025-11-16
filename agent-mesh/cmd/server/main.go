@@ -39,6 +39,13 @@ func main() {
 		Str("endpoint", endpoint).
 		Msg("Starting Agent")
 
+	// Log Banking Integrations configuration
+	log.Info().
+		Bool("banking_integrations_enabled", cfg.BankingIntegrations.Enabled).
+		Str("banking_integrations_url", cfg.BankingIntegrations.BaseURL).
+		Str("banking_integrations_timeout", fmt.Sprintf("%ds", cfg.BankingIntegrations.Timeout)).
+		Msg("Banking Integrations Configuration")
+
 	// Create agent base
 	agentBase := service.NewAgentBase(agentType, agentName, endpoint, &cfg.MCPServer, &cfg.MLModels, &cfg.BankingIntegrations)
 

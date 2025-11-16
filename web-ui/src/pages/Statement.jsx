@@ -14,6 +14,18 @@ export default function Statement() {
 
   useEffect(() => {
     loadStatement()
+    
+    // Listen for transaction completed events
+    const handleTransactionCompleted = () => {
+      console.log('Transaction completed, refreshing statement...')
+      loadStatement()
+    }
+    
+    window.addEventListener('transactionCompleted', handleTransactionCompleted)
+    
+    return () => {
+      window.removeEventListener('transactionCompleted', handleTransactionCompleted)
+    }
   }, [dateRange])
 
   const loadStatement = async () => {
@@ -23,14 +35,38 @@ export default function Statement() {
       const fromDate = new Date(dateRange.from).toISOString()
       const toDate = new Date(dateRange.to).toISOString()
       const data = await bankingAPI.getStatement(user.id, 'ACC_001', fromDate, toDate, user.channel)
-      setTransactions(data.transactions || [])
+      // Transform transactions to match UI format
+      const formattedTransactions = (data.transactions || []).map(txn => ({
+        transaction_id: txn.transaction_id,
+        description: txn.remarks || `Transfer to ${txn.to_account || 'Account'}`,
+        amount: txn.amount,
+        type: txn.type?.toLowerCase() === 'credit' ? 'credit' : 'debit',
+        date: txn.created_at ? new Date(txn.created_at).toLocaleDateString() : new Date().toLocaleDateString(),
+        reference: txn.reference_number || txn.transaction_id,
+        status: txn.status?.toLowerCase() || 'completed',
+        to_account: txn.to_account,
+        from_account: txn.from_account,
+      }))
+      setTransactions(formattedTransactions)
     } catch (error) {
       console.error('Failed to load statement:', error)
       // Fallback to transaction history if statement fails
       try {
         const days = Math.ceil((new Date(dateRange.to) - new Date(dateRange.from)) / (1000 * 60 * 60 * 24))
         const historyData = await bankingAPI.getTransactionHistory(user.id, days)
-        setTransactions(historyData.transactions || [])
+        // Transform transactions to match UI format
+        const formattedTransactions = (historyData.transactions || []).map(txn => ({
+          transaction_id: txn.transaction_id,
+          description: txn.remarks || `Transfer to ${txn.to_account || 'Account'}`,
+          amount: txn.amount,
+          type: txn.type?.toLowerCase() === 'credit' ? 'credit' : 'debit',
+          date: txn.created_at ? new Date(txn.created_at).toLocaleDateString() : new Date().toLocaleDateString(),
+          reference: txn.reference_number || txn.transaction_id,
+          status: txn.status?.toLowerCase() || 'completed',
+          to_account: txn.to_account,
+          from_account: txn.from_account,
+        }))
+        setTransactions(formattedTransactions)
       } catch (fallbackError) {
         console.error('Failed to load transaction history:', fallbackError)
         setTransactions([])

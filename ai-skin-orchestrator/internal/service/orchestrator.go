@@ -184,6 +184,16 @@ func (o *Orchestrator) ProcessRequest(ctx context.Context, req *model.UserReques
 					Str("user_id", req.UserID).
 					Msg("Stored transaction in RAG from agent response")
 			}
+			
+			// Check if this is a beneficiary addition response
+			if beneficiaryID, ok := agentResponse.Result["beneficiary_id"].(string); ok && beneficiaryID != "" {
+				log.Info().
+					Str("beneficiary_id", beneficiaryID).
+					Str("user_id", req.UserID).
+					Msg("Beneficiary added successfully - should be stored in Banking Integrations DWH")
+				// Note: Beneficiary is already stored in Banking Integrations DWH by the agent
+				// The UI will refresh via the event dispatched in AIAssistant.jsx
+			}
 		}
 	}
 
@@ -195,6 +205,48 @@ func (o *Orchestrator) ProcessRequest(ctx context.Context, req *model.UserReques
 	mergedResponse, err := o.responseMerger.MergeResponses(responses)
 	if err != nil {
 		return nil, fmt.Errorf("failed to merge responses: %w", err)
+	}
+
+	// Step 9: Also check merged response for transaction_id (in case it's in FinalResult)
+	if mergedResponse.FinalResult != nil {
+		if txnID, ok := mergedResponse.FinalResult["transaction_id"].(string); ok && txnID != "" {
+			// Check if we already stored this transaction
+			amount, _ := mergedResponse.FinalResult["amount"].(float64)
+			status, _ := mergedResponse.FinalResult["status"].(string)
+			if status == "" {
+				status = mergedResponse.Status
+			}
+			
+			// Determine transaction type from intent
+			txnType := "TRANSFER"
+			if intent.Type == model.IntentTransferNEFT {
+				txnType = "NEFT"
+			} else if intent.Type == model.IntentTransferRTGS {
+				txnType = "RTGS"
+			} else if intent.Type == model.IntentTransferIMPS {
+				txnType = "IMPS"
+			} else if intent.Type == model.IntentTransferUPI {
+				txnType = "UPI"
+			}
+			
+			// Store transaction in RAG if not already stored
+			if o.ragService != nil {
+				txnRecord := &model.TransactionRecord{
+					TransactionID: txnID,
+					Type:          txnType,
+					Amount:        amount,
+					Timestamp:     time.Now(),
+					Status:        status,
+				}
+				o.ragService.StoreTransaction(ctx, req.UserID, txnRecord)
+				
+				log.Info().
+					Str("transaction_id", txnID).
+					Str("user_id", req.UserID).
+					Float64("amount", amount).
+					Msg("Stored transaction in RAG from merged response")
+			}
+		}
 	}
 
 	duration := time.Since(startTime)

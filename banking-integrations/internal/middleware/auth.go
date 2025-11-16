@@ -9,7 +9,8 @@ import (
 // AuthMiddleware validates API key from header
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" {
+		// Allow health check and OPTIONS (preflight) requests without auth
+		if r.URL.Path == "/health" || r.Method == "OPTIONS" {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -21,6 +21,7 @@ func NewMBService() *MBService {
 }
 
 // GetBalance retrieves account balance for mobile banking
+// Note: This method should receive dwhService to get actual balance, but for now we'll use a shared approach
 func (mb *MBService) GetBalance(ctx context.Context, req *model.BalanceRequest) (*model.BalanceResponse, error) {
 	log.Info().
 		Str("user_id", req.UserID).
@@ -29,6 +30,7 @@ func (mb *MBService) GetBalance(ctx context.Context, req *model.BalanceRequest) 
 		Msg("MB: Getting balance")
 
 	// Mock implementation - in production would query database
+	// For now, use default balance (will be updated by gateway)
 	balance := 150000.0
 	availableBalance := balance - 5000.0 // Reserve for pending transactions
 

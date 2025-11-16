@@ -17,6 +17,18 @@ export default function Beneficiaries() {
 
   useEffect(() => {
     loadBeneficiaries()
+    
+    // Listen for beneficiary added events from AI Assistant
+    const handleBeneficiaryAdded = () => {
+      console.log('Beneficiary added via AI Assistant, refreshing list...')
+      loadBeneficiaries()
+    }
+    
+    window.addEventListener('beneficiaryAdded', handleBeneficiaryAdded)
+    
+    return () => {
+      window.removeEventListener('beneficiaryAdded', handleBeneficiaryAdded)
+    }
   }, [])
 
   const loadBeneficiaries = async () => {

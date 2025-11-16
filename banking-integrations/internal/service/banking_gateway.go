@@ -3,8 +3,11 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
+	"time"
 
 	"github.com/aibanking/banking-integrations/internal/model"
+	"github.com/rs/zerolog/log"
 )
 
 // BankingGateway provides unified interface for all banking channels
@@ -25,38 +28,158 @@ func NewBankingGateway(mbService *MBService, nbService *NBService, dwhService *D
 
 // GetBalance retrieves balance based on channel
 func (bg *BankingGateway) GetBalance(ctx context.Context, req *model.BalanceRequest) (*model.BalanceResponse, error) {
+	// Get balance from DWH (which maintains actual balance)
+	balance := bg.dwhService.GetBalance(req.UserID)
+	availableBalance := balance - 5000.0 // Reserve for pending transactions
+	
+	// Get response from channel service (for other fields)
+	var response *model.BalanceResponse
+	var err error
 	switch req.Channel {
 	case model.ChannelMB:
-		return bg.mbService.GetBalance(ctx, req)
+		response, err = bg.mbService.GetBalance(ctx, req)
 	case model.ChannelNB:
-		return bg.nbService.GetBalance(ctx, req)
+		response, err = bg.nbService.GetBalance(ctx, req)
 	default:
 		return nil, fmt.Errorf("unsupported channel: %s", req.Channel)
 	}
+	
+	if err != nil {
+		return nil, err
+	}
+	
+	// Update with actual balance from DWH
+	response.Balance = balance
+	response.AvailableBalance = availableBalance
+	response.LastUpdated = time.Now()
+	
+	return response, nil
 }
 
 // TransferFunds processes transfer based on channel
 func (bg *BankingGateway) TransferFunds(ctx context.Context, req *model.TransferRequest) (*model.TransferResponse, error) {
+	// Get current balance
+	currentBalance := bg.dwhService.GetBalance(req.UserID)
+	
+	// Check if sufficient balance
+	if currentBalance < req.Amount {
+		return nil, fmt.Errorf("insufficient balance. Available: %.2f, Required: %.2f", currentBalance, req.Amount)
+	}
+	
+	// Process transfer via channel service
+	var response *model.TransferResponse
+	var err error
 	switch req.Channel {
 	case model.ChannelMB:
-		return bg.mbService.TransferFunds(ctx, req)
+		response, err = bg.mbService.TransferFunds(ctx, req)
 	case model.ChannelNB:
-		return bg.nbService.TransferFunds(ctx, req)
+		response, err = bg.nbService.TransferFunds(ctx, req)
 	default:
 		return nil, fmt.Errorf("unsupported channel: %s", req.Channel)
 	}
+	
+	if err != nil {
+		return nil, err
+	}
+	
+	// Update balance after successful transfer
+	newBalance := currentBalance - req.Amount
+	bg.dwhService.UpdateBalance(req.UserID, newBalance)
+	
+	// Store transaction in DWH
+	transaction := model.Transaction{
+		TransactionID: response.TransactionID,
+		AccountID:     req.FromAccount,
+		UserID:        req.UserID,
+		Type:          req.Type,
+		Amount:        req.Amount,
+		Currency:      "INR",
+		FromAccount:   req.FromAccount,
+		ToAccount:     req.ToAccount,
+		IFSC:          req.IFSC,
+		Status:        model.TransactionStatusCompleted,
+		Channel:       req.Channel,
+		ReferenceNumber: response.ReferenceNumber,
+		CreatedAt:     response.ProcessedAt,
+		CompletedAt:   &response.ProcessedAt,
+	}
+	bg.dwhService.StoreTransaction(req.UserID, transaction)
+	
+	log.Info().
+		Str("user_id", req.UserID).
+		Str("transaction_id", response.TransactionID).
+		Float64("amount", req.Amount).
+		Float64("old_balance", currentBalance).
+		Float64("new_balance", newBalance).
+		Msg("Balance updated after transfer")
+	
+	return response, nil
 }
 
 // GetStatement retrieves statement based on channel
 func (bg *BankingGateway) GetStatement(ctx context.Context, req *model.StatementRequest) (*model.StatementResponse, error) {
-	switch req.Channel {
-	case model.ChannelMB:
-		return bg.mbService.GetStatement(ctx, req)
-	case model.ChannelNB:
-		return bg.nbService.GetStatement(ctx, req)
-	default:
-		return nil, fmt.Errorf("unsupported channel: %s", req.Channel)
+	log.Info().
+		Str("user_id", req.UserID).
+		Time("start_date", req.StartDate).
+		Time("end_date", req.EndDate).
+		Int("limit", req.Limit).
+		Msg("BankingGateway: Getting statement")
+	
+	// Get transactions from DWH (last 90 days)
+	allTransactions, err := bg.dwhService.GetTransactionHistory(ctx, req.UserID, 90)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("user_id", req.UserID).
+			Msg("Failed to get transaction history from DWH")
+		return nil, err
 	}
+	
+	log.Info().
+		Str("user_id", req.UserID).
+		Int("total_from_dwh", len(allTransactions)).
+		Msg("BankingGateway: Retrieved transactions from DWH")
+	
+	// Filter transactions by date range
+	filteredTransactions := []model.Transaction{}
+	for _, txn := range allTransactions {
+		if (txn.CreatedAt.After(req.StartDate) || txn.CreatedAt.Equal(req.StartDate)) &&
+			(txn.CreatedAt.Before(req.EndDate) || txn.CreatedAt.Equal(req.EndDate)) {
+			filteredTransactions = append(filteredTransactions, txn)
+		}
+	}
+	
+	log.Info().
+		Str("user_id", req.UserID).
+		Int("after_date_filter", len(filteredTransactions)).
+		Msg("BankingGateway: Filtered transactions by date range")
+	
+	// Sort by date (newest first)
+	sort.Slice(filteredTransactions, func(i, j int) bool {
+		return filteredTransactions[i].CreatedAt.After(filteredTransactions[j].CreatedAt)
+	})
+	
+	// Apply limit if specified
+	if req.Limit > 0 && len(filteredTransactions) > req.Limit {
+		filteredTransactions = filteredTransactions[:req.Limit]
+	}
+	
+	// Create response directly with DWH transactions (don't use channel service mock data)
+	response := &model.StatementResponse{
+		AccountID:    req.AccountID,
+		StartDate:    req.StartDate,
+		EndDate:      req.EndDate,
+		Transactions: filteredTransactions,
+		Count:        len(filteredTransactions),
+		GeneratedAt:  time.Now(),
+	}
+	
+	log.Info().
+		Str("user_id", req.UserID).
+		Int("final_count", len(filteredTransactions)).
+		Msg("BankingGateway: Returning statement with actual transactions")
+	
+	return response, nil
 }
 
 // AddBeneficiary adds beneficiary based on channel

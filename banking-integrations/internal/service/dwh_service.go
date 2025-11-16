@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/aibanking/banking-integrations/internal/config"
@@ -14,14 +15,23 @@ import (
 type DWHService struct {
 	config        *config.DWHConfig
 	beneficiaries map[string][]map[string]interface{} // In-memory storage: userID -> beneficiaries
+	transactions  map[string][]model.Transaction      // In-memory storage: userID -> transactions
+	balances      map[string]float64                   // In-memory storage: userID -> balance
+	mu            sync.RWMutex                         // Mutex for thread-safe access
 	// In production, this would have database connection
 }
 
 // NewDWHService creates a new DWH service
 func NewDWHService(cfg *config.DWHConfig) *DWHService {
+	// Initialize with default balance
+	balances := make(map[string]float64)
+	balances["U10001"] = 150000.0 // Default balance for demo user
+	
 	return &DWHService{
 		config:        cfg,
 		beneficiaries: make(map[string][]map[string]interface{}),
+		transactions:  make(map[string][]model.Transaction),
+		balances:      balances,
 	}
 }
 
@@ -57,35 +67,29 @@ func (dwh *DWHService) Query(ctx context.Context, req *model.DWHQueryRequest) (*
 
 // getTransactionHistory retrieves transaction history from DWH
 func (dwh *DWHService) getTransactionHistory(ctx context.Context, req *model.DWHQueryRequest) []map[string]interface{} {
-	// Mock data - in production would query DWH database
-	history := []map[string]interface{}{
-		{
-			"transaction_id": "TXN_001",
-			"user_id":        req.UserID,
-			"amount":         25000.0,
-			"type":           "DEBIT",
-			"status":         "COMPLETED",
-			"created_at":     time.Now().AddDate(0, 0, -5),
-		},
-		{
-			"transaction_id": "TXN_002",
-			"user_id":        req.UserID,
-			"amount":         50000.0,
-			"type":           "CREDIT",
-			"status":         "COMPLETED",
-			"created_at":     time.Now().AddDate(0, 0, -10),
-		},
-		{
-			"transaction_id": "TXN_003",
-			"user_id":        req.UserID,
-			"amount":         75000.0,
-			"type":           "NEFT",
-			"status":         "COMPLETED",
-			"created_at":     time.Now().AddDate(0, 0, -15),
-		},
+	dwh.mu.RLock()
+	defer dwh.mu.RUnlock()
+	
+	// Get stored transactions for this user
+	if transactions, exists := dwh.transactions[req.UserID]; exists {
+		history := []map[string]interface{}{}
+		for _, txn := range transactions {
+			history = append(history, map[string]interface{}{
+				"transaction_id": txn.TransactionID,
+				"user_id":        txn.UserID,
+				"amount":         txn.Amount,
+				"type":           string(txn.Type),
+				"status":         string(txn.Status),
+				"from_account":   txn.FromAccount,
+				"to_account":     txn.ToAccount,
+				"created_at":     txn.CreatedAt,
+			})
+		}
+		return history
 	}
-
-	return history
+	
+	// Return empty if no transactions
+	return []map[string]interface{}{}
 }
 
 // getUserProfile retrieves user profile from DWH
@@ -143,41 +147,44 @@ func (dwh *DWHService) getAnalytics(ctx context.Context, req *model.DWHQueryRequ
 
 // GetTransactionHistory retrieves transaction history for a user
 func (dwh *DWHService) GetTransactionHistory(ctx context.Context, userID string, days int) ([]model.Transaction, error) {
+	dwh.mu.RLock()
+	defer dwh.mu.RUnlock()
+	
 	log.Info().
 		Str("user_id", userID).
 		Int("days", days).
 		Msg("DWH: Getting transaction history")
 
-	// Mock transactions - in production would query DWH
-	now := time.Now()
-	transactions := []model.Transaction{
-		{
-			TransactionID: "TXN_001",
-			UserID:        userID,
-			Type:          model.TransactionTypeNEFT,
-			Amount:        25000.0,
-			Status:        model.TransactionStatusCompleted,
-			CreatedAt:     now.AddDate(0, 0, -5),
-		},
-		{
-			TransactionID: "TXN_002",
-			UserID:        userID,
-			Type:          model.TransactionTypeUPI,
-			Amount:        5000.0,
-			Status:        model.TransactionStatusCompleted,
-			CreatedAt:     now.AddDate(0, 0, -3),
-		},
-		{
-			TransactionID: "TXN_003",
-			UserID:        userID,
-			Type:          model.TransactionTypeIMPS,
-			Amount:        10000.0,
-			Status:        model.TransactionStatusCompleted,
-			CreatedAt:     now.AddDate(0, 0, -1),
-		},
+	// Return stored transactions for this user
+	if transactions, exists := dwh.transactions[userID]; exists {
+		log.Info().
+			Str("user_id", userID).
+			Int("total_stored", len(transactions)).
+			Msg("DWH: Found stored transactions")
+		
+		// Filter by date if needed
+		cutoffDate := time.Now().AddDate(0, 0, -days)
+		filtered := []model.Transaction{}
+		for _, txn := range transactions {
+			if txn.CreatedAt.After(cutoffDate) || txn.CreatedAt.Equal(cutoffDate) {
+				filtered = append(filtered, txn)
+			}
+		}
+		
+		log.Info().
+			Str("user_id", userID).
+			Int("filtered_count", len(filtered)).
+			Time("cutoff_date", cutoffDate).
+			Msg("DWH: Returning filtered transactions")
+		
+		return filtered, nil
 	}
 
-	return transactions, nil
+	// Return empty if no transactions
+	log.Info().
+		Str("user_id", userID).
+		Msg("DWH: No transactions found for user")
+	return []model.Transaction{}, nil
 }
 
 // getBeneficiaries retrieves beneficiaries for a user
@@ -196,5 +203,64 @@ func (dwh *DWHService) StoreBeneficiary(userID string, beneficiary map[string]in
 		dwh.beneficiaries = make(map[string][]map[string]interface{})
 	}
 	dwh.beneficiaries[userID] = append(dwh.beneficiaries[userID], beneficiary)
+}
+
+// StoreTransaction stores a transaction in memory
+func (dwh *DWHService) StoreTransaction(userID string, transaction model.Transaction) {
+	dwh.mu.Lock()
+	defer dwh.mu.Unlock()
+	
+	if dwh.transactions == nil {
+		dwh.transactions = make(map[string][]model.Transaction)
+	}
+	dwh.transactions[userID] = append(dwh.transactions[userID], transaction)
+	
+	log.Info().
+		Str("user_id", userID).
+		Str("transaction_id", transaction.TransactionID).
+		Float64("amount", transaction.Amount).
+		Str("type", string(transaction.Type)).
+		Int("total_transactions", len(dwh.transactions[userID])).
+		Msg("DWH: Transaction stored")
+}
+
+// GetBalance retrieves balance for a user
+func (dwh *DWHService) GetBalance(userID string) float64 {
+	dwh.mu.RLock()
+	defer dwh.mu.RUnlock()
+	
+	if balance, exists := dwh.balances[userID]; exists {
+		log.Debug().
+			Str("user_id", userID).
+			Float64("balance", balance).
+			Msg("DWH: Retrieved balance")
+		return balance
+	}
+	// Default balance for new users
+	log.Debug().
+		Str("user_id", userID).
+		Float64("default_balance", 150000.0).
+		Msg("DWH: Using default balance")
+	return 150000.0
+}
+
+// UpdateBalance updates balance for a user
+func (dwh *DWHService) UpdateBalance(userID string, newBalance float64) {
+	dwh.mu.Lock()
+	defer dwh.mu.Unlock()
+	
+	if dwh.balances == nil {
+		dwh.balances = make(map[string]float64)
+	}
+	
+	oldBalance := dwh.balances[userID]
+	dwh.balances[userID] = newBalance
+	
+	log.Info().
+		Str("user_id", userID).
+		Float64("old_balance", oldBalance).
+		Float64("new_balance", newBalance).
+		Float64("difference", newBalance-oldBalance).
+		Msg("DWH: Balance updated")
 }
 
