@@ -17,10 +17,12 @@ import (
 
 // OllamaService handles interactions with Ollama/Llama models
 type OllamaService struct {
-	baseURL    string
-	httpClient *http.Client
-	model      string
-	enabled    bool
+	baseURL        string
+	embeddingURL   string
+	httpClient     *http.Client
+	model          string
+	embeddingModel string // Model for embeddings (can be different from chat model)
+	enabled        bool
 }
 
 // OllamaRequest represents a request to Ollama API
@@ -66,17 +68,31 @@ func NewOllamaService(cfg *config.LLMConfig) *OllamaService {
 	}
 
 	baseURL := strings.TrimSuffix(cfg.BaseURL, "/")
+	embeddingBaseURL := baseURL
+	
+	// Set up generate endpoint
 	if !strings.HasSuffix(baseURL, "/api/generate") {
 		baseURL = baseURL + "/api/generate"
 	}
-
+	
+	// Set up embeddings endpoint
+	if !strings.HasSuffix(embeddingBaseURL, "/api/embed") {
+		embeddingBaseURL = strings.TrimSuffix(embeddingBaseURL, "/api/generate")
+		embeddingBaseURL = embeddingBaseURL + "/api/embed"
+	}
+	
+	// Default embedding model (can use nomic-embed-text or mxbai-embed-large)
+	embeddingModel := "nomic-embed-text" // Good default for embeddings
+	
 	return &OllamaService{
-		baseURL: baseURL,
+		baseURL:        baseURL,
+		embeddingURL:   embeddingBaseURL,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Minute, // Increase timeout for longer responses
 		},
-		model:   cfg.Model,
-		enabled: true,
+		model:          cfg.Model,
+		embeddingModel: embeddingModel,
+		enabled:        true,
 	}
 }
 
@@ -297,5 +313,85 @@ You are here to make banking simpler, safer, and smarter for the user.`
 	promptBuilder.WriteString("Assistant:")
 
 	return promptBuilder.String()
+}
+
+// OllamaEmbeddingRequest represents a request to Ollama embeddings API
+type OllamaEmbeddingRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+}
+
+// OllamaEmbeddingResponse represents a response from Ollama embeddings API
+type OllamaEmbeddingResponse struct {
+	Embedding []float64 `json:"embedding"`
+}
+
+// GenerateEmbedding generates embeddings using Ollama's embedding API
+func (os *OllamaService) GenerateEmbedding(ctx context.Context, text string) ([]float64, error) {
+	if !os.enabled {
+		return nil, fmt.Errorf("Ollama service is disabled")
+	}
+
+	// Prepare embedding request
+	requestBody := OllamaEmbeddingRequest{
+		Model: os.embeddingModel,
+		Input: text,
+	}
+
+	jsonBody, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal embedding request: %w", err)
+	}
+
+	// Create request with timeout
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", os.embeddingURL, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create embedding request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	log.Debug().
+		Str("url", os.embeddingURL).
+		Str("model", os.embeddingModel).
+		Int("text_length", len(text)).
+		Msg("Requesting embeddings from Ollama")
+
+	// Send request
+	resp, err := os.httpClient.Do(req)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to get embeddings from Ollama, will use TF-IDF fallback")
+		return nil, fmt.Errorf("embedding request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		log.Warn().
+			Int("status", resp.StatusCode).
+			Str("response", string(bodyBytes)).
+			Msg("Ollama embeddings API returned error")
+		return nil, fmt.Errorf("embedding API returned status %d", resp.StatusCode)
+	}
+
+	// Parse response
+	var embeddingResp OllamaEmbeddingResponse
+	if err := json.NewDecoder(resp.Body).Decode(&embeddingResp); err != nil {
+		return nil, fmt.Errorf("failed to decode embedding response: %w", err)
+	}
+
+	if len(embeddingResp.Embedding) == 0 {
+		return nil, fmt.Errorf("empty embedding returned")
+	}
+
+	log.Debug().
+		Int("embedding_dim", len(embeddingResp.Embedding)).
+		Msg("Successfully generated embeddings from Ollama")
+
+	return embeddingResp.Embedding, nil
 }
 

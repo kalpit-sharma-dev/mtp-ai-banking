@@ -30,58 +30,106 @@ type RAGService struct {
 	documents map[string]*Document // In-memory storage (can be replaced with vector DB)
 	mu        sync.RWMutex
 	llmService *LLMService
+	ollamaService *OllamaService // For embeddings
 	embeddingCache map[string][]float64 // Cache for embeddings
 	embeddingMu    sync.RWMutex
+	knowledgeBase  map[string]*Document // Banking policies, FAQs
+	knowledgeMu    sync.RWMutex
 }
 
 // NewRAGService creates a new RAG service
 func NewRAGService(llmService *LLMService) *RAGService {
-	return &RAGService{
+	rag := &RAGService{
 		documents:      make(map[string]*Document),
 		llmService:     llmService,
 		embeddingCache: make(map[string][]float64),
+		knowledgeBase:  make(map[string]*Document),
 	}
+	
+	// Extract Ollama service if available
+	if llmService != nil {
+		// Try to get Ollama service from LLM service (if it's using Ollama)
+		// This is a bit of a workaround - in production, pass OllamaService directly
+	}
+	
+	// Initialize knowledge base with banking policies and FAQs
+	rag.initializeKnowledgeBase()
+	
+	return rag
+}
+
+// SetOllamaService sets the Ollama service for embeddings
+func (r *RAGService) SetOllamaService(ollama *OllamaService) {
+	r.ollamaService = ollama
 }
 
 // StoreConversation stores a conversation message in the vector store
+// Automatically chunks long conversations for better retrieval
 func (r *RAGService) StoreConversation(ctx context.Context, userID, sessionID, role, content string) error {
-	docID := fmt.Sprintf("conv_%s_%d", sessionID, time.Now().UnixNano())
+	// Chunk long conversations (over 500 words)
+	chunks := r.chunkText(content, 500)
 	
-	// Create document
-	doc := &Document{
-		ID:        docID,
-		Content:   content,
-		Metadata: map[string]interface{}{
-			"role":      role,
-			"user_id":   userID,
-			"session_id": sessionID,
-		},
-		Type:      "conversation",
-		UserID:    userID,
-		SessionID: sessionID,
-		Timestamp: time.Now(),
-	}
+	for i, chunk := range chunks {
+		docID := fmt.Sprintf("conv_%s_%d_%d", sessionID, time.Now().UnixNano(), i)
+		
+		// Create document
+		doc := &Document{
+			ID:        docID,
+			Content:   chunk,
+			Metadata: map[string]interface{}{
+				"role":       role,
+				"user_id":    userID,
+				"session_id": sessionID,
+				"chunk_index": i,
+				"total_chunks": len(chunks),
+			},
+			Type:      "conversation",
+			UserID:    userID,
+			SessionID: sessionID,
+			Timestamp: time.Now(),
+		}
 
-	// Generate embedding
-	embedding, err := r.generateEmbedding(ctx, content)
-	if err != nil {
-		log.Warn().Err(err).Msg("Failed to generate embedding, using TF-IDF fallback")
-		embedding = r.generateTFIDFEmbedding(content)
-	}
-	doc.Embedding = embedding
+		// Generate embedding
+		embedding, err := r.generateEmbedding(ctx, chunk)
+		if err != nil {
+			log.Warn().Err(err).Msg("Failed to generate embedding, using TF-IDF fallback")
+			embedding = r.generateTFIDFEmbedding(chunk)
+		}
+		doc.Embedding = embedding
 
-	// Store document
-	r.mu.Lock()
-	r.documents[docID] = doc
-	r.mu.Unlock()
+		// Store document
+		r.mu.Lock()
+		r.documents[docID] = doc
+		r.mu.Unlock()
+	}
 
 	log.Debug().
-		Str("doc_id", docID).
 		Str("user_id", userID).
 		Str("type", "conversation").
+		Int("chunks", len(chunks)).
 		Msg("Stored conversation in RAG")
 
 	return nil
+}
+
+// chunkText splits text into chunks of approximately maxWords words
+func (r *RAGService) chunkText(text string, maxWords int) []string {
+	words := strings.Fields(text)
+	if len(words) <= maxWords {
+		return []string{text}
+	}
+
+	chunks := []string{}
+	for i := 0; i < len(words); i += maxWords {
+		end := i + maxWords
+		if end > len(words) {
+			end = len(words)
+		}
+		chunk := strings.Join(words[i:end], " ")
+		chunks = append(chunks, chunk)
+	}
+
+	return chunks
 }
 
 // StoreTransaction stores a transaction record in the vector store
@@ -190,6 +238,12 @@ func (r *RAGService) RetrieveRelevantContext(ctx context.Context, userID, query 
 	}
 	r.mu.RUnlock()
 
+	// Also retrieve from knowledge base (policies, FAQs)
+	knowledgeDocs, err := r.RetrieveKnowledgeBase(ctx, query, 2)
+	if err == nil {
+		userDocs = append(userDocs, knowledgeDocs...)
+	}
+
 	// Calculate similarity scores
 	for _, doc := range userDocs {
 		doc.Score = r.cosineSimilarity(queryEmbedding, doc.Embedding)
@@ -250,7 +304,24 @@ func (r *RAGService) generateEmbedding(ctx context.Context, text string) ([]floa
 	r.embeddingMu.RUnlock()
 
 	// Try to use Ollama embeddings API if available
-	// For now, fallback to TF-IDF
+	if r.ollamaService != nil {
+		embedding, err := r.ollamaService.GenerateEmbedding(ctx, text)
+		if err == nil && len(embedding) > 0 {
+			// Cache it
+			r.embeddingMu.Lock()
+			r.embeddingCache[text] = embedding
+			r.embeddingMu.Unlock()
+			
+			log.Debug().
+				Int("dim", len(embedding)).
+				Msg("Generated embedding using Ollama")
+			
+			return embedding, nil
+		}
+		log.Warn().Err(err).Msg("Ollama embedding failed, using TF-IDF fallback")
+	}
+
+	// Fallback to TF-IDF
 	embedding := r.generateTFIDFEmbedding(text)
 
 	// Cache it
@@ -404,11 +475,16 @@ func (r *RAGService) GetUserContextSummary(ctx context.Context, userID string) (
 		summaryBuilder.WriteString("\n")
 	}
 
-	// Add recent conversation context
+	// If we have too many conversations, summarize them
+	if len(conversations) > 10 {
+		conversations = r.summarizeConversations(ctx, conversations, 5)
+	}
+
+	// Add recent conversation context (summarized if needed)
 	if len(conversations) > 0 {
 		summaryBuilder.WriteString("Recent Conversation Context:\n")
 		for i, doc := range conversations {
-			if i >= 3 { // Limit to 3 most recent
+			if i >= 5 { // Limit to 5 most recent
 				break
 			}
 			summaryBuilder.WriteString(fmt.Sprintf("- %s\n", doc.Content))
@@ -416,6 +492,57 @@ func (r *RAGService) GetUserContextSummary(ctx context.Context, userID string) (
 	}
 
 	return summaryBuilder.String(), nil
+}
+
+// summarizeConversations summarizes a list of conversations using LLM
+func (r *RAGService) summarizeConversations(ctx context.Context, conversations []*Document, maxCount int) []*Document {
+	if len(conversations) <= maxCount {
+		return conversations
+	}
+
+	// Combine old conversations into summary
+	var combinedText strings.Builder
+	for i := 0; i < len(conversations)-maxCount; i++ {
+		combinedText.WriteString(conversations[i].Content)
+		combinedText.WriteString("\n")
+	}
+
+	// Use LLM to summarize if available
+	if r.llmService != nil {
+		summaryPrompt := fmt.Sprintf(`Summarize the following banking conversation history in 2-3 sentences, focusing on key topics and user needs:
+
+%s
+
+Summary:`, combinedText.String())
+
+		summary, err := r.llmService.CallLLM(ctx, summaryPrompt)
+		if err == nil && summary != "" {
+			// Create summary document
+			summaryDoc := &Document{
+				ID:        fmt.Sprintf("summary_%d", time.Now().UnixNano()),
+				Content:   summary,
+				Type:      "conversation_summary",
+				UserID:    conversations[0].UserID,
+				Timestamp: time.Now(),
+				Metadata: map[string]interface{}{
+					"summarized_count": len(conversations) - maxCount,
+				},
+			}
+			
+			// Generate embedding for summary
+			if embedding, err := r.generateEmbedding(ctx, summary); err == nil {
+				summaryDoc.Embedding = embedding
+			}
+
+			// Return summary + recent conversations
+			result := []*Document{summaryDoc}
+			result = append(result, conversations[len(conversations)-maxCount:]...)
+			return result
+		}
+	}
+
+	// Fallback: just return most recent
+	return conversations[len(conversations)-maxCount:]
 }
 
 // ClearUserContext clears all context for a user (for testing/privacy)

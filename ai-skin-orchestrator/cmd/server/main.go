@@ -45,6 +45,15 @@ func main() {
 
 	// Initialize RAG service for context-aware conversations
 	ragService := service.NewRAGService(llmService)
+	
+	// Set Ollama service for embeddings if using Ollama
+	// Create Ollama service directly for embeddings
+	if cfg.LLM.Provider == "ollama" && cfg.LLM.Enabled {
+		ollamaSvc := service.NewOllamaService(&cfg.LLM)
+		if ollamaSvc != nil {
+			ragService.SetOllamaService(ollamaSvc)
+		}
+	}
 
 	orchestrator := service.NewOrchestrator(
 		intentParser,
