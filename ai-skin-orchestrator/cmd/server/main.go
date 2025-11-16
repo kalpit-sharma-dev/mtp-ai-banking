@@ -40,15 +40,17 @@ func main() {
 	mcpClient := service.NewMCPClient(&cfg.MCPServer)
 	responseMerger := service.NewResponseMerger()
 
+	// Initialize session service (needed for orchestrator)
+	sessionService := service.NewSessionService()
+
 	orchestrator := service.NewOrchestrator(
 		intentParser,
 		contextEnricher,
 		mcpClient,
 		responseMerger,
+		llmService,
+		sessionService,
 	)
-
-	// Initialize session service
-	sessionService := service.NewSessionService()
 
 	// Initialize controllers
 	orchestratorController := controller.NewOrchestratorController(orchestrator, sessionService)

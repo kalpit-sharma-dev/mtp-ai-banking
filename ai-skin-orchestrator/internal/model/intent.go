@@ -6,16 +6,17 @@ import "time"
 type IntentType string
 
 const (
-	IntentTransferNEFT   IntentType = "TRANSFER_NEFT"
-	IntentTransferRTGS   IntentType = "TRANSFER_RTGS"
-	IntentTransferIMPS   IntentType = "TRANSFER_IMPS"
-	IntentTransferUPI    IntentType = "TRANSFER_UPI"
-	IntentCheckBalance   IntentType = "CHECK_BALANCE"
-	IntentGetStatement   IntentType = "GET_STATEMENT"
-	IntentAddBeneficiary IntentType = "ADD_BENEFICIARY"
-	IntentApplyLoan      IntentType = "APPLY_LOAN"
-	IntentCreditScore    IntentType = "CREDIT_SCORE"
-	IntentUnknown        IntentType = "UNKNOWN"
+	IntentTransferNEFT     IntentType = "TRANSFER_NEFT"
+	IntentTransferRTGS    IntentType = "TRANSFER_RTGS"
+	IntentTransferIMPS    IntentType = "TRANSFER_IMPS"
+	IntentTransferUPI      IntentType = "TRANSFER_UPI"
+	IntentCheckBalance     IntentType = "CHECK_BALANCE"
+	IntentGetStatement     IntentType = "GET_STATEMENT"
+	IntentAddBeneficiary   IntentType = "ADD_BENEFICIARY"
+	IntentApplyLoan        IntentType = "APPLY_LOAN"
+	IntentCreditScore      IntentType = "CREDIT_SCORE"
+	IntentConversational   IntentType = "CONVERSATIONAL" // For greetings, questions about capabilities, etc.
+	IntentUnknown          IntentType = "UNKNOWN"
 )
 
 // Intent represents a parsed user intent

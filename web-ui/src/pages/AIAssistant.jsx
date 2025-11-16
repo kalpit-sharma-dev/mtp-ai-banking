@@ -114,18 +114,35 @@ export default function AIAssistant() {
           minimumFractionDigits: 2,
         }).format(balance)
         
-        message = `Your account balance is **${formattedBalance}**`
-        if (accountId) {
-          message += ` (Account: ${accountId})`
-        }
-        if (finalResult.available_balance !== undefined && finalResult.available_balance !== balance) {
-          const availableBalance = new Intl.NumberFormat('en-IN', {
+        // Show available balance if it exists and is different from total balance
+        const availableBalance = finalResult.available_balance
+        const hasAvailableBalance = availableBalance !== undefined && availableBalance !== balance
+        
+        if (hasAvailableBalance) {
+          // Show both balances with clear labels
+          const formattedAvailable = new Intl.NumberFormat('en-IN', {
             style: 'currency',
             currency: currency,
             minimumFractionDigits: 2,
-          }).format(finalResult.available_balance)
-          message += `\n\nAvailable Balance: ${availableBalance}`
+          }).format(availableBalance)
+          
+          message = `**Account Balance:** ${formattedBalance}`
+          if (accountId) {
+            message += `\nAccount: ${accountId}`
+          }
+          message += `\n\n**Available Balance:** ${formattedAvailable}`
+          message += `\n\n*Available balance is the amount you can use (excludes holds and pending transactions)*`
+        } else {
+          // Show only total balance if available balance is same or not provided
+          message = `Your account balance is **${formattedBalance}**`
+          if (accountId) {
+            message += ` (Account: ${accountId})`
+          }
         }
+      }
+      // Extract conversational messages (greetings, capability questions, etc.)
+      else if (finalResult.type === 'conversational' || finalResult.message) {
+        message = finalResult.message || response.explanation || 'I\'m here to help you with your banking needs!'
       }
       // Extract transaction information
       else if (finalResult.transaction_id) {

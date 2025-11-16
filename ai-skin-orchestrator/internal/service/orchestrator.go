@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aibanking/ai-skin-orchestrator/internal/model"
@@ -15,6 +16,8 @@ type Orchestrator struct {
 	contextEnricher  *ContextEnricher
 	mcpClient        *MCPClient
 	responseMerger   *ResponseMerger
+	llmService       *LLMService
+	sessionService   *SessionService
 }
 
 // NewOrchestrator creates a new orchestrator instance
@@ -23,12 +26,16 @@ func NewOrchestrator(
 	contextEnricher *ContextEnricher,
 	mcpClient *MCPClient,
 	responseMerger *ResponseMerger,
+	llmService *LLMService,
+	sessionService *SessionService,
 ) *Orchestrator {
 	return &Orchestrator{
 		intentParser:    intentParser,
 		contextEnricher: contextEnricher,
 		mcpClient:       mcpClient,
 		responseMerger:  responseMerger,
+		llmService:      llmService,
+		sessionService:  sessionService,
 	}
 }
 
@@ -65,6 +72,11 @@ func (o *Orchestrator) ProcessRequest(ctx context.Context, req *model.UserReques
 		Str("intent", string(intent.Type)).
 		Float64("confidence", intent.Confidence).
 		Msg("Intent parsed")
+
+	// Handle conversational queries directly with LLM (greetings, capability questions, etc.)
+	if intent.Type == model.IntentConversational {
+		return o.handleConversationalQuery(ctx, req)
+	}
 
 	// Step 2: Enrich context with user history and behavior
 	enrichedContext, err := o.contextEnricher.EnrichContext(ctx, req.UserID, req.SessionID, req.Channel, *intent)
@@ -107,6 +119,106 @@ func (o *Orchestrator) ProcessRequest(ctx context.Context, req *model.UserReques
 		Msg("Request processed successfully")
 
 	return mergedResponse, nil
+}
+
+// handleConversationalQuery handles greetings, capability questions, and other conversational queries
+func (o *Orchestrator) handleConversationalQuery(ctx context.Context, req *model.UserRequest) (*model.MergedResponse, error) {
+	log.Info().
+		Str("user_id", req.UserID).
+		Str("input", req.Input).
+		Msg("Handling conversational query")
+
+	// Get conversation history from session
+	var conversationHistory []map[string]string
+	if req.SessionID != "" && o.sessionService != nil {
+		allHistory := o.sessionService.GetConversationHistory(req.SessionID)
+		// Get last 10 messages for context
+		start := 0
+		if len(allHistory) > 10 {
+			start = len(allHistory) - 10
+		}
+		conversationHistory = allHistory[start:]
+	}
+
+	// Call LLM service with conversation history
+	if o.llmService != nil {
+		response, err := o.llmService.CallLLMWithHistory(ctx, req.Input, conversationHistory)
+		if err != nil {
+			log.Warn().Err(err).Msg("LLM service failed, using fallback response")
+			// Fallback response
+			response = o.getFallbackConversationalResponse(req.Input)
+		}
+
+		return &model.MergedResponse{
+			Status: "APPROVED",
+			FinalResult: map[string]interface{}{
+				"message": response,
+				"type":    "conversational",
+			},
+			RiskScore:   0.0,
+			Explanation: response,
+			AgentResponses: []model.AgentResponse{},
+		}, nil
+	}
+
+	// Fallback if LLM service not available
+	response := o.getFallbackConversationalResponse(req.Input)
+	return &model.MergedResponse{
+		Status: "APPROVED",
+		FinalResult: map[string]interface{}{
+			"message": response,
+			"type":    "conversational",
+		},
+		RiskScore:   0.0,
+		Explanation: response,
+		AgentResponses: []model.AgentResponse{},
+	}, nil
+}
+
+// getFallbackConversationalResponse provides fallback responses for conversational queries
+func (o *Orchestrator) getFallbackConversationalResponse(input string) string {
+	inputLower := strings.ToLower(strings.TrimSpace(input))
+	
+	// Greetings
+	if strings.HasPrefix(inputLower, "hello") || strings.HasPrefix(inputLower, "hi") || 
+	   strings.HasPrefix(inputLower, "hey") || strings.HasPrefix(inputLower, "greetings") {
+		return "Hello! I'm your AI banking assistant. How can I help you with your banking needs today?"
+	}
+	
+	// How are you
+	if strings.Contains(inputLower, "how are you") || strings.Contains(inputLower, "how do you do") {
+		return "I'm doing great, thank you for asking! I'm here to help you with your banking operations. What would you like to do today?"
+	}
+	
+	// Capability questions
+	if strings.Contains(inputLower, "what can you") || strings.Contains(inputLower, "what do you") ||
+	   strings.Contains(inputLower, "capabilities") || strings.Contains(inputLower, "operations") ||
+	   strings.Contains(inputLower, "support") || strings.Contains(inputLower, "help") {
+		return `I'm your AI banking assistant, and I can help you with the following operations:
+
+• **Check Balance** - View your account balance
+• **Fund Transfer** - Transfer money via NEFT, RTGS, IMPS, or UPI
+• **View Statement** - Get your account statement and transaction history
+• **Add Beneficiary** - Add a new payee for transfers
+• **Create Fixed Deposit** - Open a fixed deposit account
+• **Apply for Loan** - Apply for personal, home, or other loans
+• **Credit Score** - Check your credit score
+
+Just tell me what you'd like to do, and I'll help you with it!`
+	}
+	
+	// Thanks
+	if strings.HasPrefix(inputLower, "thank") || strings.HasPrefix(inputLower, "thanks") {
+		return "You're welcome! Is there anything else I can help you with?"
+	}
+	
+	// Goodbye
+	if strings.HasPrefix(inputLower, "bye") || strings.HasPrefix(inputLower, "goodbye") {
+		return "Goodbye! Have a great day. Feel free to come back if you need any banking assistance."
+	}
+	
+	// Default
+	return "I'm your AI banking assistant. I can help you with balance checks, fund transfers, statements, and more. What would you like to do?"
 }
 
 // shouldUseMultiAgent determines if multiple agents should be involved

@@ -69,9 +69,9 @@ func (ip *IntentParser) parseStructuredInput(input string) (*model.Intent, error
 	}
 
 	return &model.Intent{
-		Type:        model.IntentType(intentType),
-		Confidence:  1.0,
-		Entities:    entities,
+		Type:         model.IntentType(intentType),
+		Confidence:   1.0,
+		Entities:     entities,
 		OriginalText: input,
 	}, nil
 }
@@ -79,9 +79,11 @@ func (ip *IntentParser) parseStructuredInput(input string) (*model.Intent, error
 // parseWithLLM uses LLM to parse natural language intent
 func (ip *IntentParser) parseWithLLM(ctx context.Context, userInput string) (*model.Intent, error) {
 	prompt := fmt.Sprintf(`Analyze the following banking request and extract:
-1. Intent type (one of: TRANSFER_NEFT, TRANSFER_RTGS, TRANSFER_IMPS, TRANSFER_UPI, CHECK_BALANCE, GET_STATEMENT, ADD_BENEFICIARY, APPLY_LOAN, CREDIT_SCORE)
+1. Intent type (one of: TRANSFER_NEFT, TRANSFER_RTGS, TRANSFER_IMPS, TRANSFER_UPI, CHECK_BALANCE, GET_STATEMENT, ADD_BENEFICIARY, APPLY_LOAN, CREDIT_SCORE, CONVERSATIONAL)
 2. Entities (amount, account number, beneficiary, etc.)
 3. Confidence score (0.0 to 1.0)
+
+Note: If the request is a greeting (hello, hi, how are you), question about capabilities (what can you do, what operations do you support), or a conversational query, use intent: "CONVERSATIONAL".
 
 User request: "%s"
 
@@ -112,9 +114,9 @@ Respond in JSON format:
 	}
 
 	return &model.Intent{
-		Type:        model.IntentType(result.Intent),
-		Confidence:  result.Confidence,
-		Entities:   result.Entities,
+		Type:         model.IntentType(result.Intent),
+		Confidence:   result.Confidence,
+		Entities:     result.Entities,
 		OriginalText: userInput,
 	}, nil
 }
@@ -130,11 +132,11 @@ func (ip *IntentParser) initializeIntentPatterns() {
 				regexp.MustCompile(`(?i)neft\s+transfer\s+of\s+(\d+(?:,\d{3})*(?:\.\d{2})?)`),
 			},
 			Keywords: map[string]float64{
-				"neft":    1.0,
+				"neft":     1.0,
 				"transfer": 0.9,
-				"send":    0.8,
-				"money":   0.7,
-				"amount":  0.6,
+				"send":     0.8,
+				"money":    0.7,
+				"amount":   0.6,
 			},
 			IntentType: model.IntentTransferNEFT,
 		},
@@ -146,10 +148,10 @@ func (ip *IntentParser) initializeIntentPatterns() {
 				regexp.MustCompile(`(?i)rtgs\s+transfer\s+of\s+(\d+(?:,\d{3})*(?:\.\d{2})?)`),
 			},
 			Keywords: map[string]float64{
-				"rtgs":    1.0,
+				"rtgs":     1.0,
 				"transfer": 0.9,
-				"send":    0.8,
-				"money":   0.7,
+				"send":     0.8,
+				"money":    0.7,
 			},
 			IntentType: model.IntentTransferRTGS,
 		},
@@ -161,10 +163,10 @@ func (ip *IntentParser) initializeIntentPatterns() {
 				regexp.MustCompile(`(?i)imps\s+transfer\s+of\s+(\d+(?:,\d{3})*(?:\.\d{2})?)`),
 			},
 			Keywords: map[string]float64{
-				"imps":    1.0,
+				"imps":     1.0,
 				"transfer": 0.9,
-				"send":    0.8,
-				"money":   0.7,
+				"send":     0.8,
+				"money":    0.7,
 			},
 			IntentType: model.IntentTransferIMPS,
 		},
@@ -177,11 +179,11 @@ func (ip *IntentParser) initializeIntentPatterns() {
 				regexp.MustCompile(`(?i)upi\s+(?:to|for)\s+([a-zA-Z0-9@._-]+)`),
 			},
 			Keywords: map[string]float64{
-				"upi":     1.0,
+				"upi":      1.0,
 				"transfer": 0.9,
-				"send":    0.8,
-				"pay":     0.8,
-				"money":   0.7,
+				"send":     0.8,
+				"pay":      0.8,
+				"money":    0.7,
 			},
 			IntentType: model.IntentTransferUPI,
 		},
@@ -214,11 +216,11 @@ func (ip *IntentParser) initializeIntentPatterns() {
 				regexp.MustCompile(`(?i)recent\s+transactions`),
 			},
 			Keywords: map[string]float64{
-				"statement":  1.0,
+				"statement":    1.0,
 				"transactions": 0.9,
-				"history":   0.8,
-				"mini":      0.7,
-				"recent":    0.6,
+				"history":      0.8,
+				"mini":         0.7,
+				"recent":       0.6,
 			},
 			IntentType: model.IntentGetStatement,
 		},
@@ -247,13 +249,13 @@ func (ip *IntentParser) initializeIntentPatterns() {
 				regexp.MustCompile(`(?i)loan\s+application`),
 			},
 			Keywords: map[string]float64{
-				"loan":       1.0,
-				"apply":      0.9,
-				"borrow":     0.8,
-				"credit":     0.7,
-				"emi":        0.6,
-				"personal":   0.5,
-				"home":       0.5,
+				"loan":     1.0,
+				"apply":    0.9,
+				"borrow":   0.8,
+				"credit":   0.7,
+				"emi":      0.6,
+				"personal": 0.5,
+				"home":     0.5,
 			},
 			IntentType: model.IntentApplyLoan,
 		},
@@ -266,51 +268,106 @@ func (ip *IntentParser) initializeIntentPatterns() {
 				regexp.MustCompile(`(?i)what\s+is\s+my\s+credit\s+score`),
 			},
 			Keywords: map[string]float64{
-				"credit":  1.0,
+				"credit": 1.0,
 				"score":  0.9,
 				"cibil":  0.8,
 				"rating": 0.7,
 			},
 			IntentType: model.IntentCreditScore,
 		},
+		{
+			Name: "conversational",
+			Patterns: []*regexp.Regexp{
+				regexp.MustCompile(`(?i)^(hello|hi|hey|greetings|good\s+(morning|afternoon|evening))`),
+				regexp.MustCompile(`(?i)^(how\s+are\s+you|how\s+do\s+you\s+do|what's\s+up|how's\s+it\s+going)`),
+				regexp.MustCompile(`(?i)(what\s+(all|can|do)\s+(you|can\s+you)\s+(do|support|help|perform|operations))`),
+				regexp.MustCompile(`(?i)(what\s+(are\s+)?(your\s+)?(capabilities|features|services|functions))`),
+				regexp.MustCompile(`(?i)(tell\s+me\s+(about\s+)?(what\s+you\s+can\s+do|your\s+capabilities))`),
+				regexp.MustCompile(`(?i)^(thanks|thank\s+you|thank\s+you\s+very\s+much)`),
+				regexp.MustCompile(`(?i)^(bye|goodbye|see\s+you|tata)`),
+			},
+			Keywords: map[string]float64{
+				"hello":        1.0,
+				"hi":           1.0,
+				"hey":          0.9,
+				"how are you":  0.95,
+				"what can you": 0.9,
+				"capabilities": 0.9,
+				"operations":   0.8,
+				"support":      0.8,
+				"help":         0.7,
+				"thanks":       0.9,
+				"thank you":    0.9,
+				"bye":          0.9,
+			},
+			IntentType: model.IntentConversational,
+		},
 	}
 }
 
 // parseWithRules uses rule-based parsing with pattern matching and weighted keywords
 func (ip *IntentParser) parseWithRules(userInput string) (*model.Intent, error) {
-	input := strings.ToLower(userInput)
-	
-	// Find best matching intent
+	input := strings.ToLower(strings.TrimSpace(userInput))
+
+	// First check for conversational queries (greetings, capability questions, etc.)
+	// These should be detected before other intents to avoid false matches
+	conversationalPattern := ip.patterns[len(ip.patterns)-1] // Last pattern is conversational
+	if conversationalPattern.IntentType == model.IntentConversational {
+		confidence := ip.calculateConfidence(input, &conversationalPattern)
+		if confidence >= 0.5 {
+			return &model.Intent{
+				Type:         model.IntentConversational,
+				Confidence:   confidence,
+				Entities:     make(map[string]interface{}),
+				OriginalText: userInput,
+			}, nil
+		}
+	}
+
+	// Find best matching intent for banking operations
 	var bestIntent *IntentPattern
 	highestConfidence := 0.0
-	
+
 	for i := range ip.patterns {
 		pattern := &ip.patterns[i]
+		// Skip conversational pattern in main loop (already checked)
+		if pattern.IntentType == model.IntentConversational {
+			continue
+		}
 		confidence := ip.calculateConfidence(input, pattern)
-		
+
 		if confidence > highestConfidence {
 			highestConfidence = confidence
 			bestIntent = pattern
 		}
 	}
-	
+
 	// Extract entities based on best intent
 	entities := ip.extractEntities(userInput, bestIntent)
-	
-	// If no good match, default to unknown
+
+	// If no good match, default to conversational (for friendly fallback) if it's a short query
 	if bestIntent == nil || highestConfidence < 0.3 {
+		// If it's a very short query (likely a greeting or question), treat as conversational
+		if len(strings.Fields(input)) <= 5 {
+			return &model.Intent{
+				Type:         model.IntentConversational,
+				Confidence:   0.6,
+				Entities:     entities,
+				OriginalText: userInput,
+			}, nil
+		}
 		return &model.Intent{
-			Type:        model.IntentUnknown,
-			Confidence:  highestConfidence,
-			Entities:    entities,
+			Type:         model.IntentUnknown,
+			Confidence:   highestConfidence,
+			Entities:     entities,
 			OriginalText: userInput,
 		}, nil
 	}
-	
+
 	return &model.Intent{
-		Type:        bestIntent.IntentType,
-		Confidence:  highestConfidence,
-		Entities:    entities,
+		Type:         bestIntent.IntentType,
+		Confidence:   highestConfidence,
+		Entities:     entities,
 		OriginalText: userInput,
 	}, nil
 }
@@ -319,14 +376,14 @@ func (ip *IntentParser) parseWithRules(userInput string) (*model.Intent, error) 
 func (ip *IntentParser) calculateConfidence(message string, pattern *IntentPattern) float64 {
 	confidence := 0.0
 	words := strings.Fields(message)
-	
+
 	// Check regex patterns (higher weight for exact matches)
 	for _, regexPattern := range pattern.Patterns {
 		if regexPattern.MatchString(message) {
 			confidence += 0.5
 		}
 	}
-	
+
 	// Check weighted keywords (both single words and multi-word phrases)
 	keywordMatches := 0
 	for keyword, weight := range pattern.Keywords {
@@ -347,12 +404,12 @@ func (ip *IntentParser) calculateConfidence(message string, pattern *IntentPatte
 			}
 		}
 	}
-	
+
 	// Normalize confidence (cap at 1.0)
 	if confidence > 1.0 {
 		confidence = 1.0
 	}
-	
+
 	// Boost confidence if multiple keywords match
 	if keywordMatches > 1 {
 		confidence = confidence * 1.1
@@ -360,7 +417,7 @@ func (ip *IntentParser) calculateConfidence(message string, pattern *IntentPatte
 			confidence = 1.0
 		}
 	}
-	
+
 	return confidence
 }
 
@@ -368,32 +425,32 @@ func (ip *IntentParser) calculateConfidence(message string, pattern *IntentPatte
 func (ip *IntentParser) extractEntities(message string, pattern *IntentPattern) map[string]interface{} {
 	entities := make(map[string]interface{})
 	input := strings.ToLower(message)
-	
+
 	// Extract amount (common for transfers)
 	amountRegex := regexp.MustCompile(`(?i)(?:rs\.?|₹|rupees?)?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:rs|rupees|inr)?`)
 	if matches := amountRegex.FindStringSubmatch(message); len(matches) > 1 {
 		amountStr := strings.ReplaceAll(matches[1], ",", "")
 		entities["amount"] = amountStr
 	}
-	
+
 	// Extract account number
 	accountRegex := regexp.MustCompile(`(?i)(?:account|acc|ac)\s*(?:no|number|#)?\s*:?\s*([\dX]{4,})`)
 	if matches := accountRegex.FindStringSubmatch(message); len(matches) > 1 {
 		entities["to_account"] = matches[1]
 	}
-	
+
 	// Extract IFSC code
 	ifscRegex := regexp.MustCompile(`(?i)ifsc\s*:?\s*([A-Z]{4}0[A-Z0-9]{6})`)
 	if matches := ifscRegex.FindStringSubmatch(message); len(matches) > 1 {
 		entities["ifsc"] = matches[1]
 	}
-	
+
 	// Extract UPI ID
 	upiRegex := regexp.MustCompile(`(?i)([a-zA-Z0-9._-]+@[a-zA-Z0-9]+)`)
 	if matches := upiRegex.FindStringSubmatch(message); len(matches) > 1 {
 		entities["upi_id"] = matches[1]
 	}
-	
+
 	// Extract payee/beneficiary name
 	if pattern != nil && (pattern.IntentType == model.IntentAddBeneficiary || pattern.IntentType == model.IntentTransferNEFT || pattern.IntentType == model.IntentTransferRTGS || pattern.IntentType == model.IntentTransferIMPS) {
 		nameRegex := regexp.MustCompile(`(?i)(?:to|for|payee|beneficiary|named)\s+([a-zA-Z\s]{2,})`)
@@ -401,7 +458,7 @@ func (ip *IntentParser) extractEntities(message string, pattern *IntentPattern) 
 			entities["payee_name"] = strings.TrimSpace(matches[1])
 		}
 	}
-	
+
 	// Extract loan type
 	if pattern != nil && pattern.IntentType == model.IntentApplyLoan {
 		loanTypes := []string{"personal", "home", "car", "business"}
@@ -412,7 +469,7 @@ func (ip *IntentParser) extractEntities(message string, pattern *IntentPattern) 
 			}
 		}
 	}
-	
+
 	// Extract transfer method if not already specified
 	if pattern != nil && (pattern.IntentType == model.IntentTransferNEFT || pattern.IntentType == model.IntentTransferRTGS || pattern.IntentType == model.IntentTransferIMPS || pattern.IntentType == model.IntentTransferUPI) {
 		methods := map[string]string{
@@ -432,7 +489,6 @@ func (ip *IntentParser) extractEntities(message string, pattern *IntentPattern) 
 			entities["method"] = "UPI"
 		}
 	}
-	
+
 	return entities
 }
-
