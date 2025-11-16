@@ -12,14 +12,16 @@ import (
 
 // DWHService handles Data Warehouse operations
 type DWHService struct {
-	config *config.DWHConfig
+	config        *config.DWHConfig
+	beneficiaries map[string][]map[string]interface{} // In-memory storage: userID -> beneficiaries
 	// In production, this would have database connection
 }
 
 // NewDWHService creates a new DWH service
 func NewDWHService(cfg *config.DWHConfig) *DWHService {
 	return &DWHService{
-		config: cfg,
+		config:        cfg,
+		beneficiaries: make(map[string][]map[string]interface{}),
 	}
 }
 
@@ -39,6 +41,8 @@ func (dwh *DWHService) Query(ctx context.Context, req *model.DWHQueryRequest) (*
 		data = dwh.getUserProfile(ctx, req)
 	case "ANALYTICS":
 		data = dwh.getAnalytics(ctx, req)
+	case "BENEFICIARIES":
+		data = dwh.getBeneficiaries(ctx, req)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %s", req.QueryType)
 	}
@@ -174,5 +178,23 @@ func (dwh *DWHService) GetTransactionHistory(ctx context.Context, userID string,
 	}
 
 	return transactions, nil
+}
+
+// getBeneficiaries retrieves beneficiaries for a user
+func (dwh *DWHService) getBeneficiaries(ctx context.Context, req *model.DWHQueryRequest) []map[string]interface{} {
+	// Return stored beneficiaries for this user
+	if beneficiaries, exists := dwh.beneficiaries[req.UserID]; exists {
+		return beneficiaries
+	}
+	// Return empty array if no beneficiaries found
+	return []map[string]interface{}{}
+}
+
+// StoreBeneficiary stores a beneficiary in memory
+func (dwh *DWHService) StoreBeneficiary(userID string, beneficiary map[string]interface{}) {
+	if dwh.beneficiaries == nil {
+		dwh.beneficiaries = make(map[string][]map[string]interface{})
+	}
+	dwh.beneficiaries[userID] = append(dwh.beneficiaries[userID], beneficiary)
 }
 

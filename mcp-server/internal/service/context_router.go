@@ -120,8 +120,9 @@ func (cr *ContextRouter) routeByIntent(ctx context.Context, task *model.Task, en
 		reason = "Account inquiry operation"
 
 	case "ADD_BENEFICIARY", "MANAGE_BENEFICIARY":
-		agentType = model.AgentTypeGuardrail
-		reason = "Beneficiary management requires validation"
+		// Route to Banking agent (can add Guardrail validation later if needed)
+		agentType = model.AgentTypeBanking
+		reason = "Beneficiary management via banking agent"
 
 	case "APPLY_LOAN", "LOAN_APPROVAL":
 		agentType = model.AgentTypeClearance

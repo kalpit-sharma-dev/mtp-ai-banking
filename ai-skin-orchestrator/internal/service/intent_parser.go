@@ -473,9 +473,30 @@ func (ip *IntentParser) extractEntities(message string, pattern *IntentPattern) 
 
 	// Extract payee/beneficiary name
 	if pattern != nil && (pattern.IntentType == model.IntentAddBeneficiary || pattern.IntentType == model.IntentTransferNEFT || pattern.IntentType == model.IntentTransferRTGS || pattern.IntentType == model.IntentTransferIMPS) {
-		nameRegex := regexp.MustCompile(`(?i)(?:to|for|payee|beneficiary|named)\s+([a-zA-Z\s]{2,})`)
-		if matches := nameRegex.FindStringSubmatch(message); len(matches) > 1 {
-			entities["payee_name"] = strings.TrimSpace(matches[1])
+		// Try multiple patterns for beneficiary name
+		// Pattern 1: "add beneficiary [Name]"
+		nameRegex1 := regexp.MustCompile(`(?i)add\s+(?:new\s+)?(?:payee|beneficiary)\s+(?:named\s+)?([a-zA-Z\s]{2,})`)
+		// Pattern 2: "to [Name]" or "for [Name]"
+		nameRegex2 := regexp.MustCompile(`(?i)(?:to|for|payee|beneficiary|named)\s+([a-zA-Z\s]{2,})`)
+		// Pattern 3: "[Name] account" (name before account number)
+		nameRegex3 := regexp.MustCompile(`(?i)^([a-zA-Z\s]{2,})\s+(?:account|acc)`)
+		
+		if matches := nameRegex1.FindStringSubmatch(message); len(matches) > 1 {
+			// Extract name and remove any trailing words like "account", "with", etc.
+			name := strings.TrimSpace(matches[1])
+			// Remove common trailing words
+			name = regexp.MustCompile(`(?i)\s+(?:account|acc|with|having|details?)$`).ReplaceAllString(name, "")
+			entities["payee_name"] = name
+			entities["name"] = name // Also set as "name" for consistency
+		} else if matches := nameRegex2.FindStringSubmatch(message); len(matches) > 1 {
+			name := strings.TrimSpace(matches[1])
+			name = regexp.MustCompile(`(?i)\s+(?:account|acc|with|having|details?)$`).ReplaceAllString(name, "")
+			entities["payee_name"] = name
+			entities["name"] = name
+		} else if matches := nameRegex3.FindStringSubmatch(message); len(matches) > 1 {
+			name := strings.TrimSpace(matches[1])
+			entities["payee_name"] = name
+			entities["name"] = name
 		}
 	}
 

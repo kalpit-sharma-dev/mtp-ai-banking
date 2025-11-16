@@ -16,6 +16,17 @@ export default defineConfig({
             console.log('Proxy error:', err)
           })
         }
+      },
+      // Proxy for Banking Integrations service (port 7000)
+      '/banking': {
+        target: 'http://localhost:7000',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/banking/, ''),
+        configure: (proxy, _options) => {
+          proxy.on('error', (err, _req, _res) => {
+            console.log('Banking proxy error:', err)
+          })
+        }
       }
     }
   }

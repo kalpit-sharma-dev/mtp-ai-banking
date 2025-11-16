@@ -20,6 +20,15 @@ const setupAxiosInstance = (baseURL) => {
   instance.interceptors.response.use(
     (response) => response,
     (error) => {
+      // Log full error for debugging
+      console.error('API Error Details:', {
+        message: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+        request: error.request,
+        config: error.config,
+      })
+
       if (error.response) {
         // Server responded with error
         return Promise.reject({
@@ -28,10 +37,16 @@ const setupAxiosInstance = (baseURL) => {
           data: error.response.data,
         })
       } else if (error.request) {
-        // Request made but no response
+        // Request made but no response - check if it's a CORS issue
+        const url = error.config?.url || error.config?.baseURL || 'unknown'
+        const isCorsError = error.message?.includes('CORS') || error.message?.includes('Network Error')
+        
         return Promise.reject({
-          message: 'Network error. Please check if the backend service is running.',
+          message: isCorsError 
+            ? 'CORS error. Please check if the service allows cross-origin requests.'
+            : `Network error connecting to ${url}. Please check if the backend service is running.`,
           status: 0,
+          isNetworkError: true,
         })
       } else {
         // Something else happened
@@ -96,7 +111,10 @@ export const mcpServerAPI = {
 }
 
 // Banking Integrations API
-const bankingAPIClient = setupAxiosInstance('http://localhost:7000')
+// In dev: use '/banking' which Vite proxies to http://localhost:7000
+// In prod: use full URL
+const BANKING_API_BASE_URL = import.meta.env.VITE_BANKING_API_BASE_URL || (import.meta.env.DEV ? '/banking' : 'http://localhost:7000')
+const bankingAPIClient = setupAxiosInstance(BANKING_API_BASE_URL)
 
 export const bankingAPI = {
   // Get balance
@@ -141,16 +159,19 @@ export const bankingAPI = {
 
   // Get beneficiaries (using DWH query)
   getBeneficiaries: async (userId) => {
-    // Since there's no direct endpoint, we'll use DWH query
+    // Use DWH query to get beneficiaries
     try {
       const response = await bankingAPIClient.post('/api/v1/dwh/query', {
         query_type: 'BENEFICIARIES',
         user_id: userId,
       })
-      return response.data
+      // DWH returns { query_type, data: [...], count, executed_at }
+      // Extract beneficiaries from data array
+      const beneficiaries = response.data?.data || []
+      return { beneficiaries }
     } catch (error) {
-      // Fallback: return empty array if endpoint doesn't exist
-      console.warn('Beneficiaries endpoint not available, returning empty array')
+      // If error, return empty array
+      console.warn('Failed to get beneficiaries:', error)
       return { beneficiaries: [] }
     }
   },

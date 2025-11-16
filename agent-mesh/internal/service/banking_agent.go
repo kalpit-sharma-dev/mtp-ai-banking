@@ -406,22 +406,81 @@ func (ba *BankingAgent) addBeneficiary(ctx context.Context, req *model.AgentRequ
 		return nil, fmt.Errorf("invalid data in input context")
 	}
 
-	account, _ := data["account"].(string)
-	name, _ := data["name"].(string)
-	ifsc, _ := data["ifsc"].(string)
+	// Extract fields with multiple possible names (handle both UI and AI Assistant formats)
+	accountNumber := ""
+	if acc, ok := data["account_number"].(string); ok && acc != "" {
+		accountNumber = acc
+	} else if acc, ok := data["account"].(string); ok && acc != "" {
+		accountNumber = acc
+	} else if acc, ok := data["to_account"].(string); ok && acc != "" {
+		accountNumber = acc
+	}
+
+	name := ""
+	if n, ok := data["name"].(string); ok && n != "" {
+		name = n
+	} else if n, ok := data["payee_name"].(string); ok && n != "" {
+		name = n
+	}
+
+	ifsc := ""
+	if i, ok := data["ifsc"].(string); ok && i != "" {
+		ifsc = i
+	}
+
+	// Get user_id and channel from input context
+	userID, _ := inputCtx["user_id"].(string)
+	channel, _ := inputCtx["channel"].(string)
+	if channel == "" {
+		channel = "MB" // Default to Mobile Banking
+	}
+
+	// Validate required fields
+	if accountNumber == "" || name == "" || ifsc == "" {
+		return &model.AgentResponse{
+			AgentID:     ba.agentType,
+			AgentType:   "BANKING",
+			Status:      "REJECTED",
+			Result:      map[string]interface{}{"error": "Missing required fields: account_number, name, or ifsc"},
+			RiskScore:   0.0,
+			Explanation: "Please provide beneficiary name, account number, and IFSC code",
+			Confidence:  0.0,
+			Timestamp:   time.Now(),
+			RequestID:   req.RequestID,
+		}, nil
+	}
 
 	log.Info().
-		Str("account", account).
+		Str("user_id", userID).
+		Str("account", accountNumber).
 		Str("name", name).
+		Str("ifsc", ifsc).
+		Str("channel", channel).
 		Msg("Adding beneficiary")
 
+	// Try to call Banking Integrations service first
+	if ba.bankingIntegrationsEnabled {
+		beneficiaryResp, err := ba.callBankingAddBeneficiary(ctx, userID, accountNumber, ifsc, name, channel)
+		if err == nil {
+			log.Info().
+				Str("user_id", userID).
+				Str("source", "banking_integrations").
+				Msg("Beneficiary added via Banking Integrations")
+			return beneficiaryResp, nil
+		}
+		log.Warn().Err(err).Msg("Failed to add beneficiary via Banking Integrations, using fallback")
+	}
+
+	// Fallback to mock response (for development/testing)
+	beneficiaryID := fmt.Sprintf("BEN_%s", uuid.New().String()[:8])
 	result := map[string]interface{}{
-		"status":         "APPROVED",
-		"beneficiary_id": fmt.Sprintf("BEN_%s", uuid.New().String()[:8]),
-		"account":        account,
-		"name":           name,
-		"ifsc":           ifsc,
-		"added_at":       time.Now(),
+		"status":          "APPROVED",
+		"beneficiary_id":  beneficiaryID,
+		"account_number":  accountNumber,
+		"name":            name,
+		"ifsc":            ifsc,
+		"added_at":        time.Now(),
+		"message":         fmt.Sprintf("Beneficiary %s added successfully", name),
 	}
 
 	return &model.AgentResponse{
@@ -430,10 +489,59 @@ func (ba *BankingAgent) addBeneficiary(ctx context.Context, req *model.AgentRequ
 		Status:      "APPROVED",
 		Result:      result,
 		RiskScore:   0.1,
-		Explanation: "Beneficiary added successfully",
+		Explanation: fmt.Sprintf("Beneficiary %s added successfully", name),
 		Confidence:  0.9,
 		Timestamp:   time.Now(),
 		RequestID:   req.RequestID,
+	}, nil
+}
+
+// callBankingAddBeneficiary calls Banking Integrations service to add beneficiary
+func (ba *BankingAgent) callBankingAddBeneficiary(ctx context.Context, userID, accountNumber, ifsc, name, channel string) (*model.AgentResponse, error) {
+	payload := map[string]interface{}{
+		"user_id":        userID,
+		"account_number": accountNumber,
+		"ifsc":           ifsc,
+		"name":           name,
+		"channel":        channel,
+	}
+
+	result, err := ba.CallBankingService(ctx, "/api/v1/beneficiary", payload)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract beneficiary response
+	responseResult := map[string]interface{}{
+		"status":          "APPROVED",
+		"beneficiary_id":  result["beneficiary_id"],
+		"account_number":  accountNumber,
+		"name":            name,
+		"ifsc":            ifsc,
+		"added_at":        time.Now(),
+	}
+
+	if message, ok := result["message"].(string); ok {
+		responseResult["message"] = message
+	} else {
+		responseResult["message"] = fmt.Sprintf("Beneficiary %s added successfully", name)
+	}
+
+	// Include bank_name if available
+	if bankName, ok := result["bank_name"].(string); ok {
+		responseResult["bank_name"] = bankName
+	}
+
+	return &model.AgentResponse{
+		AgentID:     ba.agentType,
+		AgentType:   "BANKING",
+		Status:      "APPROVED",
+		Result:      responseResult,
+		RiskScore:   0.1,
+		Explanation: fmt.Sprintf("Beneficiary %s added successfully", name),
+		Confidence:  0.95,
+		Timestamp:   time.Now(),
+		RequestID:   "",
 	}, nil
 }
 

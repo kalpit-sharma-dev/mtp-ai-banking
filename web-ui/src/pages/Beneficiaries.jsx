@@ -36,18 +36,51 @@ export default function Beneficiaries() {
     setSubmitting(true)
 
     try {
-      await bankingAPI.addBeneficiary({
+      const response = await bankingAPI.addBeneficiary({
         user_id: user.id,
         account_number: formData.account_number,
         ifsc: formData.ifsc,
         name: formData.name,
         channel: user.channel,
       })
+      
+      // Show success message
+      if (response && response.beneficiary_id) {
+        console.log('Beneficiary added successfully:', response)
+      }
+      
       setShowAddForm(false)
       setFormData({ account_number: '', ifsc: '', name: '' })
-      loadBeneficiaries()
+      
+      // Reload beneficiaries list
+      await loadBeneficiaries()
     } catch (error) {
-      console.error('Failed to add beneficiary:', error)
+      console.error('Failed to add beneficiary - Full error:', error)
+      
+      // Provide more helpful error messages
+      let errorMessage = 'Failed to add beneficiary. '
+      
+      // Check for network errors
+      if (error.status === 0 || error.isNetworkError || error.message?.includes('Network error') || error.message?.includes('Network Error')) {
+        // Test if service is actually reachable
+        errorMessage += '\n\nThe Banking Integrations service (port 7000) may not be running or accessible.\n\n'
+        errorMessage += 'Please:\n'
+        errorMessage += '1. Ensure the service is started: cd banking-integrations && go run cmd/server/main.go\n'
+        errorMessage += '2. Check if port 7000 is accessible\n'
+        errorMessage += '3. Check browser console for detailed error information'
+      } else if (error.status === 400) {
+        errorMessage += 'Invalid data provided. Please check all fields are filled correctly.'
+      } else if (error.status === 401) {
+        errorMessage += 'Authentication failed. Please check API key configuration.'
+      } else if (error.status === 500) {
+        errorMessage += 'Server error occurred. Please try again later.'
+      } else if (error.message) {
+        errorMessage += error.message
+      } else {
+        errorMessage += 'Please check the details and try again.'
+      }
+      
+      alert(errorMessage)
     } finally {
       setSubmitting(false)
     }
@@ -87,7 +120,8 @@ export default function Beneficiaries() {
                 type="text"
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent text-gray-900 bg-white"
+                placeholder="Enter beneficiary name"
                 required
               />
             </div>
@@ -97,7 +131,8 @@ export default function Beneficiaries() {
                 type="text"
                 value={formData.account_number}
                 onChange={(e) => setFormData({ ...formData, account_number: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent text-gray-900 bg-white"
+                placeholder="Enter account number"
                 required
               />
             </div>
@@ -107,7 +142,8 @@ export default function Beneficiaries() {
                 type="text"
                 value={formData.ifsc}
                 onChange={(e) => setFormData({ ...formData, ifsc: e.target.value.toUpperCase() })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent text-gray-900 bg-white"
+                placeholder="Enter IFSC code"
                 required
               />
             </div>

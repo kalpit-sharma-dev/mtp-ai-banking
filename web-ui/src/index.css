@@ -17,6 +17,24 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Override text color for input fields to ensure visibility */
+input[type="text"],
+input[type="number"],
+input[type="email"],
+input[type="password"],
+textarea {
+  color: #111827 !important; /* text-gray-900 */
+  background-color: #ffffff !important; /* bg-white */
+}
+
+input[type="text"]::placeholder,
+input[type="number"]::placeholder,
+input[type="email"]::placeholder,
+input[type="password"]::placeholder,
+textarea::placeholder {
+  color: #9ca3af !important; /* text-gray-400 */
+}
+
 body {
   margin: 0;
   min-height: 100vh;

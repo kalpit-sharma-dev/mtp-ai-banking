@@ -188,13 +188,26 @@ export default function AIAssistant() {
         }
       }
       // Extract beneficiary information
-      else if (finalResult.beneficiary_id || finalResult.beneficiaries) {
+      else if (finalResult.beneficiary_id || finalResult.beneficiaries || finalResult.account_number) {
         if (finalResult.beneficiaries && Array.isArray(finalResult.beneficiaries)) {
           const count = finalResult.beneficiaries.length
           message = `You have ${count} saved beneficiary${count !== 1 ? 'ies' : ''}.\n\n`
           finalResult.beneficiaries.forEach((ben, idx) => {
             message += `${idx + 1}. ${ben.name || 'Beneficiary'} - ${ben.account_number || ''} (${ben.ifsc || ''})\n`
           })
+        } else if (finalResult.beneficiary_id || finalResult.account_number) {
+          // Single beneficiary addition
+          const name = finalResult.name || 'Beneficiary'
+          const account = finalResult.account_number || finalResult.account || ''
+          const ifsc = finalResult.ifsc || ''
+          const beneficiaryId = finalResult.beneficiary_id || ''
+          
+          message = finalResult.message || `✅ Beneficiary added successfully!\n\n`
+          message += `Name: ${name}\n`
+          message += `Account Number: ${account}\n`
+          if (ifsc) message += `IFSC: ${ifsc}\n`
+          if (beneficiaryId) message += `Beneficiary ID: ${beneficiaryId}\n`
+          if (finalResult.bank_name) message += `Bank: ${finalResult.bank_name}\n`
         } else {
           message = finalResult.message || 'Beneficiary operation completed successfully.'
         }

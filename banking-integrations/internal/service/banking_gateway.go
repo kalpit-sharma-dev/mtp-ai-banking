@@ -61,14 +61,36 @@ func (bg *BankingGateway) GetStatement(ctx context.Context, req *model.Statement
 
 // AddBeneficiary adds beneficiary based on channel
 func (bg *BankingGateway) AddBeneficiary(ctx context.Context, channel model.Channel, userID, accountNumber, ifsc, name string) (*model.Beneficiary, error) {
+	var beneficiary *model.Beneficiary
+	var err error
+	
 	switch channel {
 	case model.ChannelMB:
-		return bg.mbService.AddBeneficiary(ctx, userID, accountNumber, ifsc, name)
+		beneficiary, err = bg.mbService.AddBeneficiary(ctx, userID, accountNumber, ifsc, name)
 	case model.ChannelNB:
-		return bg.nbService.AddBeneficiary(ctx, userID, accountNumber, ifsc, name)
+		beneficiary, err = bg.nbService.AddBeneficiary(ctx, userID, accountNumber, ifsc, name)
 	default:
 		return nil, fmt.Errorf("unsupported channel: %s", channel)
 	}
+	
+	if err != nil {
+		return nil, err
+	}
+	
+	// Store beneficiary in DWH for retrieval
+	beneficiaryMap := map[string]interface{}{
+		"beneficiary_id": beneficiary.BeneficiaryID,
+		"user_id":        beneficiary.UserID,
+		"account_number": beneficiary.AccountNumber,
+		"ifsc":           beneficiary.IFSC,
+		"name":           beneficiary.Name,
+		"account_type":   beneficiary.AccountType,
+		"status":         beneficiary.Status,
+		"added_at":       beneficiary.AddedAt,
+	}
+	bg.dwhService.StoreBeneficiary(userID, beneficiaryMap)
+	
+	return beneficiary, nil
 }
 
 // QueryDWH queries data warehouse
