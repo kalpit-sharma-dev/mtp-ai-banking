@@ -58,6 +58,21 @@ func (bg *BankingGateway) GetBalance(ctx context.Context, req *model.BalanceRequ
 
 // TransferFunds processes transfer based on channel
 func (bg *BankingGateway) TransferFunds(ctx context.Context, req *model.TransferRequest) (*model.TransferResponse, error) {
+	// Validate that recipient is an added beneficiary
+	if !bg.dwhService.IsBeneficiary(req.UserID, req.ToAccount, req.IFSC) {
+		log.Warn().
+			Str("user_id", req.UserID).
+			Str("to_account", req.ToAccount).
+			Str("ifsc", req.IFSC).
+			Msg("Transfer rejected: Recipient is not an added beneficiary")
+		return nil, fmt.Errorf("transfer failed: recipient '%s' is not an added beneficiary. Please add the beneficiary first before transferring funds", req.ToAccount)
+	}
+	
+	log.Info().
+		Str("user_id", req.UserID).
+		Str("to_account", req.ToAccount).
+		Msg("Transfer validated: Recipient is a valid beneficiary")
+	
 	// Get current balance
 	currentBalance := bg.dwhService.GetBalance(req.UserID)
 	

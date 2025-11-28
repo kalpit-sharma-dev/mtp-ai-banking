@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -189,6 +190,9 @@ func (dwh *DWHService) GetTransactionHistory(ctx context.Context, userID string,
 
 // getBeneficiaries retrieves beneficiaries for a user
 func (dwh *DWHService) getBeneficiaries(ctx context.Context, req *model.DWHQueryRequest) []map[string]interface{} {
+	dwh.mu.RLock()
+	defer dwh.mu.RUnlock()
+	
 	// Return stored beneficiaries for this user
 	if beneficiaries, exists := dwh.beneficiaries[req.UserID]; exists {
 		return beneficiaries
@@ -199,10 +203,71 @@ func (dwh *DWHService) getBeneficiaries(ctx context.Context, req *model.DWHQuery
 
 // StoreBeneficiary stores a beneficiary in memory
 func (dwh *DWHService) StoreBeneficiary(userID string, beneficiary map[string]interface{}) {
+	dwh.mu.Lock()
+	defer dwh.mu.Unlock()
+	
 	if dwh.beneficiaries == nil {
 		dwh.beneficiaries = make(map[string][]map[string]interface{})
 	}
 	dwh.beneficiaries[userID] = append(dwh.beneficiaries[userID], beneficiary)
+}
+
+// IsBeneficiary checks if the given recipient (by name or account number) is a valid beneficiary for the user
+func (dwh *DWHService) IsBeneficiary(userID string, recipientName string, accountNumber string) bool {
+	dwh.mu.RLock()
+	defer dwh.mu.RUnlock()
+	
+	if dwh.beneficiaries == nil {
+		return false
+	}
+	
+	beneficiaries, exists := dwh.beneficiaries[userID]
+	if !exists || len(beneficiaries) == 0 {
+		return false
+	}
+	
+	// Check if recipient matches any beneficiary by name or account number
+	for _, beneficiary := range beneficiaries {
+		beneficiaryName, _ := beneficiary["name"].(string)
+		beneficiaryAccount, _ := beneficiary["account_number"].(string)
+		status, _ := beneficiary["status"].(string)
+		
+		// Skip inactive beneficiaries
+		if status != "ACTIVE" {
+			continue
+		}
+		
+		// Match by name (case-insensitive)
+		if recipientName != "" && beneficiaryName != "" {
+			if strings.EqualFold(strings.TrimSpace(recipientName), strings.TrimSpace(beneficiaryName)) {
+				log.Info().
+					Str("user_id", userID).
+					Str("recipient", recipientName).
+					Str("beneficiary_name", beneficiaryName).
+					Msg("DWH: Found beneficiary match by name")
+				return true
+			}
+		}
+		
+		// Match by account number (if provided)
+		if accountNumber != "" && beneficiaryAccount != "" {
+			if strings.TrimSpace(accountNumber) == strings.TrimSpace(beneficiaryAccount) {
+				log.Info().
+					Str("user_id", userID).
+					Str("account_number", accountNumber).
+					Str("beneficiary_account", beneficiaryAccount).
+					Msg("DWH: Found beneficiary match by account number")
+				return true
+			}
+		}
+	}
+	
+	log.Info().
+		Str("user_id", userID).
+		Str("recipient_name", recipientName).
+		Str("account_number", accountNumber).
+		Msg("DWH: Recipient is not a valid beneficiary")
+	return false
 }
 
 // StoreTransaction stores a transaction in memory
