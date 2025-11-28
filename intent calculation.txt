@@ -1,0 +1,234 @@
+Reviewing the intent parser to explain how intent calculation works:
+
+
+[2 tools called]
+
+
+## Intent calculation overview
+
+The project uses a hybrid approach with three methods, in priority order:
+
+### Method selection flow
+
+```
+User Input
+    ↓
+Is inputType == "structured"?
+    ├─ YES → Method 1: Structured Input (Confidence = 1.0)
+    └─ NO → Is LLM enabled and available?
+            ├─ YES → Method 2: LLM-Based Parsing
+            └─ NO → Method 3: Rule-Based Parsing (Default)
+```
+
+---
+
+## Method 1: Structured input (direct JSON)
+
+When: `inputType == "structured"`
+
+```go
+// Lines 54-77
+Input: {"intent": "TRANSFER_NEFT", "entities": {"amount": 50000}}
+    ↓
+Parse JSON directly
+    ↓
+Result: Intent=TRANSFER_NEFT, Confidence=1.0 (100%)
+```
+
+---
+
+## Method 2: LLM-based parsing
+
+When: `LLM_ENABLED=true` and LLM service is available
+
+```go
+// Lines 79-133
+1. Create prompt with user input
+2. Call LLM with structured prompt
+3. LLM returns JSON: {intent, confidence, entities}
+4. Parse response
+5. If LLM fails → Fallback to rule-based
+```
+
+Prompt template (lines 81-109):
+- Lists all possible intent types
+- Asks for entities extraction
+- Requests confidence score (0.0-1.0)
+- Returns structured JSON
+
+Confidence: Provided by LLM (typically 0.85-0.95)
+
+---
+
+## Method 3: Rule-based parsing (default)
+
+When: LLM is disabled or unavailable
+
+### Step 1: Check conversational queries first (lines 343-356)
+
+```go
+// Priority check for greetings/capabilities
+if conversationalPattern matches && confidence >= 0.5:
+    return IntentConversational
+```
+
+### Step 2: Calculate confidence for each intent pattern (lines 406-453)
+
+The `calculateConfidence()` function uses a weighted scoring system:
+
+#### A. Regex pattern matching (lines 412-416)
+```go
+for each regex pattern in pattern.Patterns:
+    if pattern.MatchString(message):
+        confidence += 0.5  // Base boost for pattern match
+```
+
+#### B. Weighted keyword matching (lines 418-437)
+```go
+for each keyword in pattern.Keywords:
+    if keyword found in message:
+        confidence += keyword.weight  // Add keyword's weight
+        
+// Example for GET_STATEMENT:
+Keywords: {
+    "statement":    1.0,  // Highest weight
+    "transactions": 0.9,
+    "history":      0.8,
+    "mini":         0.7,
+    "recent":       0.6
+}
+```
+
+#### C. Multi-keyword boost (lines 444-450)
+```go
+if keywordMatches > 1:
+    confidence = confidence * 1.1  // 10% boost for multiple matches
+    if confidence > 1.0:
+        confidence = 1.0  // Cap at 1.0
+```
+
+### Step 3: Select best intent (lines 358-374)
+
+```go
+highestConfidence = 0.0
+bestIntent = nil
+
+for each pattern in patterns:
+    confidence = calculateConfidence(input, pattern)
+    if confidence > highestConfidence:
+        highestConfidence = confidence
+        bestIntent = pattern
+
+return bestIntent with highestConfidence
+```
+
+### Step 4: Extract entities (lines 455-589)
+
+After intent is determined, extract relevant entities:
+- Amount: `(?i)(?:rs\.?|₹|rupees?)?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)`
+- Account Number: `(?i)(?:account|acc|ac)\s*(?:no|number|#)?\s*[-:]?\s*([\dX]+)`
+- IFSC Code: `(?i)ifsc\s*(?:code)?\s*[-:]?\s*([A-Z0-9]+)`
+- Beneficiary Name: Multiple patterns for name extraction
+- UPI ID: `(?i)([a-zA-Z0-9._-]+@[a-zA-Z0-9]+)`
+
+---
+
+## Example calculation
+
+### Example 1: "Check my balance"
+
+```
+Input: "Check my balance"
+    ↓
+Step 1: Check conversational? → No match
+    ↓
+Step 2: Calculate confidence for each pattern:
+    - CHECK_BALANCE pattern:
+        * Regex match: "check\s+(?:my\s+)?(?:account\s+)?balance" → +0.5
+        * Keywords: "balance" (1.0) → +1.0
+        * Total: 1.5 → Normalize to 1.0
+    - Other patterns: Lower confidence
+    ↓
+Step 3: Select best → CHECK_BALANCE (confidence: 1.0)
+    ↓
+Step 4: Extract entities → None
+    ↓
+Result: Intent=CHECK_BALANCE, Confidence=1.0, Entities={}
+```
+
+### Example 2: "Transaction history"
+
+```
+Input: "Transaction history"
+    ↓
+Step 1: Check conversational? → No match
+    ↓
+Step 2: Calculate confidence:
+    - GET_STATEMENT pattern:
+        * Regex match: "transaction\s+history" → +0.5
+        * Keywords: "transactions" (0.9) + "history" (0.8) → +1.7
+        * Multiple keywords boost: 2.2 * 1.1 = 2.42 → Normalize to 1.0
+    ↓
+Step 3: Select best → GET_STATEMENT (confidence: 1.0)
+    ↓
+Result: Intent=GET_STATEMENT, Confidence=1.0, Entities={}
+```
+
+### Example 3: "Transfer 50000 via NEFT to account XXXX4321"
+
+```
+Input: "Transfer 50000 via NEFT to account XXXX4321"
+    ↓
+Step 2: Calculate confidence:
+    - TRANSFER_NEFT pattern:
+        * Regex match: "transfer\s+(\d+)\s+via\s+neft" → +0.5
+        * Keywords: "neft" (1.0) + "transfer" (0.9) → +1.9
+        * Multiple keywords boost: 2.4 * 1.1 = 2.64 → Normalize to 1.0
+    ↓
+Step 3: Select best → TRANSFER_NEFT (confidence: 1.0)
+    ↓
+Step 4: Extract entities:
+    * Amount: "50000" → entities["amount"] = "50000"
+    * Account: "XXXX4321" → entities["to_account"] = "XXXX4321"
+    ↓
+Result: Intent=TRANSFER_NEFT, Confidence=1.0, 
+        Entities={amount:"50000", to_account:"XXXX4321"}
+```
+
+---
+
+## Intent patterns defined
+
+The system has 10 intent patterns (lines 137-336):
+
+1. TRANSFER_NEFT — NEFT transfers
+2. TRANSFER_RTGS — RTGS transfers
+3. TRANSFER_IMPS — IMPS transfers
+4. TRANSFER_UPI — UPI transfers
+5. CHECK_BALANCE — Balance inquiries
+6. GET_STATEMENT — Statement/transaction history
+7. ADD_BENEFICIARY — Add payee
+8. APPLY_LOAN — Loan applications
+9. CREDIT_SCORE — Credit score queries
+10. CONVERSATIONAL — Greetings, capabilities, general chat
+
+Each pattern has:
+- Regex patterns for exact phrase matching
+- Weighted keywords for flexible matching
+- Intent type mapping
+
+---
+
+## Confidence thresholds
+
+- Confidence ≥ 0.5: Valid intent (conversational check)
+- Confidence ≥ 0.3: Acceptable match
+- Confidence < 0.3: Unknown intent (or conversational if query is short ≤5 words)
+
+This hybrid approach provides:
+- High accuracy with LLM when available
+- Fast fallback with rule-based parsing
+- Structured input support for API calls
+- Weighted scoring for flexible matching
+
+The system prioritizes accuracy while maintaining performance and reliability.
